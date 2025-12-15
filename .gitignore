@@ -1,0 +1,33 @@
+# Environment
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Node (frontend)
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Database
+*.db
+
+# Claude Code
+.claude/
+
+# Mockups
+mockups/

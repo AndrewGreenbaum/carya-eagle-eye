@@ -1,0 +1,38 @@
+# Core Framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+sqlmodel>=0.0.14
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.9
+alembic>=1.13.0
+
+# Scraping
+crawlee>=0.1.0
+playwright>=1.41.0
+httpx>=0.26.0
+beautifulsoup4>=4.12.0
+lxml>=5.1.0
+
+# AI/ML
+instructor>=1.4.0
+anthropic>=0.39.0
+openai>=1.12.0
+pgvector>=0.2.4
+
+# Scheduling
+apscheduler>=3.10.0
+
+# Utilities
+pydantic>=2.6.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+python-dateutil>=2.8.0
+feedparser>=6.0.0
+
+# Google Sheets (for feedback/flagging)
+gspread>=6.0.0
+google-auth>=2.27.0
+
+# Dev/Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
