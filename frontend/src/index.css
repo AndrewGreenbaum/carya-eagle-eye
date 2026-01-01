@@ -1,0 +1,235 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base styles */
+body {
+  font-family: 'JetBrains Mono', Menlo, Monaco, Consolas, monospace;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #0a0a0c;
+  color: #cbd5e1;
+}
+
+/* Selection color */
+::selection {
+  background-color: rgba(16, 185, 129, 0.3);
+}
+
+/* Custom scrollbar - dark theme */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a0a0c;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Hide scrollbar utility */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Pulse glow animation for status indicator */
+.pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 10px #10b981;
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 20px #10b981, 0 0 30px #10b981;
+    opacity: 0.8;
+  }
+}
+
+/* Golden shimmer animation for logo */
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 3s ease-in-out infinite;
+}
+
+/* Scan progress bar animation - moves back and forth */
+@keyframes scan-bar {
+  0% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(200%);
+  }
+  100% {
+    transform: translateX(-100%);
+  }
+}
+
+.animate-scan-bar {
+  animation: scan-bar 2s ease-in-out infinite;
+}
+
+/* Status indicator colors */
+.status-live {
+  @apply bg-emerald-500 shadow-[0_0_10px_#10b981];
+}
+
+.status-processing {
+  @apply bg-orange-500 shadow-[0_0_10px_#f97316] animate-pulse;
+}
+
+.status-idle {
+  @apply bg-slate-500;
+}
+
+.status-error {
+  @apply bg-red-500 shadow-[0_0_10px_#ef4444];
+}
+
+/* Table row hover effect */
+.deal-row {
+  @apply transition-colors duration-150;
+}
+
+.deal-row:hover {
+  @apply bg-slate-900/50;
+}
+
+/* Category badges */
+.category-badge {
+  @apply inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs border;
+}
+
+.category-infrastructure {
+  @apply bg-blue-500/10 text-blue-400 border-blue-500/30;
+}
+
+.category-security {
+  @apply bg-red-500/10 text-red-400 border-red-500/30;
+}
+
+.category-vertical_saas {
+  @apply bg-green-500/10 text-green-400 border-green-500/30;
+}
+
+.category-agentic {
+  @apply bg-purple-500/10 text-purple-400 border-purple-500/30;
+}
+
+.category-data_intelligence {
+  @apply bg-amber-500/10 text-amber-400 border-amber-500/30;
+}
+
+.category-consumer,
+.category-not_enterprise {
+  @apply bg-slate-800 text-slate-500 border-slate-700;
+}
+
+/* Non-AI category badges */
+.category-crypto {
+  @apply bg-orange-500/10 text-orange-400 border-orange-500/30;
+}
+
+.category-fintech {
+  @apply bg-emerald-500/10 text-emerald-400 border-emerald-500/30;
+}
+
+.category-healthcare {
+  @apply bg-rose-500/10 text-rose-400 border-rose-500/30;
+}
+
+.category-hardware {
+  @apply bg-gray-500/10 text-gray-400 border-gray-500/30;
+}
+
+.category-saas {
+  @apply bg-sky-500/10 text-sky-400 border-sky-500/30;
+}
+
+.category-other,
+.category-not_ai {
+  @apply bg-slate-800 text-slate-500 border-slate-700;
+}
+
+/* Stage badges */
+.stage-badge {
+  @apply px-1.5 py-0.5 rounded text-xxs border;
+}
+
+.stage-seed, .stage-pre_seed {
+  @apply bg-purple-500/10 text-purple-400 border-purple-500/30;
+}
+
+.stage-series_a {
+  @apply bg-blue-500/10 text-blue-400 border-blue-500/30;
+}
+
+.stage-series_b {
+  @apply bg-cyan-500/10 text-cyan-400 border-cyan-500/30;
+}
+
+.stage-series_c, .stage-series_d {
+  @apply bg-emerald-500/10 text-emerald-400 border-emerald-500/30;
+}
+
+.stage-growth {
+  @apply bg-amber-500/10 text-amber-400 border-amber-500/30;
+}
+
+.stage-exit {
+  @apply bg-slate-500/10 text-slate-400 border-slate-500/30;
+}
+
+/* Button styles */
+.btn-primary {
+  @apply px-3 py-1.5 bg-emerald-500/10 text-emerald-500 border border-emerald-500/50 rounded;
+  @apply hover:bg-emerald-500/20 transition-colors text-xs font-medium;
+}
+
+.btn-secondary {
+  @apply px-3 py-1.5 bg-slate-800 text-slate-300 border border-slate-700 rounded;
+  @apply hover:bg-slate-700 transition-colors text-xs font-medium;
+}
+
+/* Stats card */
+.stats-card {
+  @apply p-4 bg-gradient-to-br from-slate-900 to-slate-900/50 border border-slate-800 rounded;
+  @apply hover:border-emerald-500/30 transition-colors;
+}
+
+/* Filter checkbox */
+.filter-checkbox {
+  @apply w-4 h-4 border rounded flex items-center justify-center text-xxs font-bold;
+  @apply transition-colors cursor-pointer;
+}
+
+.filter-checkbox.checked {
+  @apply border-cyan-700 bg-cyan-950/50 text-cyan-500;
+}
+
+.filter-checkbox.unchecked {
+  @apply border-slate-700 bg-transparent;
+}
