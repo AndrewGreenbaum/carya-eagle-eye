@@ -1,0 +1,12 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
+# Run migrations before starting the app
+releaseCommand = "python -m alembic upgrade head"
+
+[service]
+internalPort = 8000
