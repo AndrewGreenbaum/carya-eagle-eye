@@ -31,3 +31,19 @@ build/
 
 # Mockups
 mockups/
+
+# macOS
+.DS_Store
+
+# Logs
+logs/
+
+# Playwright data
+.playwright-data/
+
+# Personal/temp files
+*.pdf
+EXPANSION_OPTIONS.txt
+dashboard*.html
+dashbaord.html
+resume*.txt
