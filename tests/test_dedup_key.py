@@ -80,12 +80,42 @@ def make_amount_dedup_key(company_name: str, amount_usd: int, announced_date):
         date_bucket = days_since_epoch // 3
         date_str = str(date_bucket)
     else:
+        # FIX (2026-01): Changed from weekly to monthly bucket for consistency
         today = date.today()
-        week_bucket = (today - date(1970, 1, 1)).days // 7
-        date_str = f'nodate_{week_bucket}'
+        month_bucket = (today - date(1970, 1, 1)).days // 30
+        date_str = f'nodate_{month_bucket}'
 
     key_data = f'{normalized_name}|amt{amount_bucket}|{date_str}'
     return hashlib.md5(key_data.encode()).hexdigest()
+
+
+def get_adjacent_bucket_keys(company_name: str, round_type: str, announced_date) -> list:
+    """
+    Generate dedup_keys for adjacent date buckets to catch boundary cases.
+
+    FIX (2026-01 Optimist bug): Jan 21 (bucket 6824) and Jan 22 (bucket 6825) land in
+    different 3-day buckets, generating different dedup_keys. This helper generates
+    keys for adjacent buckets so we can check for near-duplicates across bucket boundaries.
+    """
+    normalized_name = _normalize_company_name_for_dedup(company_name)
+    adjacent_keys = []
+
+    if announced_date:
+        days_since_epoch = (announced_date - date(1970, 1, 1)).days
+        primary_bucket = days_since_epoch // 3
+        for bucket_offset in [-1, 1]:
+            adjacent_bucket = primary_bucket + bucket_offset
+            key_data = f"{normalized_name}|{round_type}|{adjacent_bucket}"
+            adjacent_keys.append(hashlib.md5(key_data.encode()).hexdigest())
+    else:
+        today = date.today()
+        primary_month_bucket = (today - date(1970, 1, 1)).days // 30
+        for bucket_offset in [-1, 1]:
+            adjacent_bucket = primary_month_bucket + bucket_offset
+            key_data = f"{normalized_name}|{round_type}|nodate_{adjacent_bucket}"
+            adjacent_keys.append(hashlib.md5(key_data.encode()).hexdigest())
+
+    return adjacent_keys
 
 
 class TestCompanyNameNormalization:
@@ -176,10 +206,10 @@ class TestDedupKeyGeneration:
         assert k1 != k2
 
     def test_none_date(self):
-        """None date should use week bucket."""
+        """None date should use month bucket (FIX 2026-01: changed from week)."""
         k1 = make_dedup_key("Converge Bio", "series_a", None)
         k2 = make_dedup_key("Converge Bio", "series_a", None)
-        # Same company+round+same week = same key
+        # Same company+round+same month = same key
         assert k1 == k2
 
     def test_key_is_32_chars(self):
@@ -303,6 +333,88 @@ class TestAmountDedupKeyGeneration:
         key = make_amount_dedup_key("Parloa", 350_000_000, date(2026, 1, 15))
         assert len(key) == 32
         assert all(c in '0123456789abcdef' for c in key)
+
+
+class TestAdjacentBucketKeys:
+    """Tests for adjacent bucket key generation (Optimist bug fix)."""
+
+    def test_jan_21_vs_jan_22_caught(self):
+        """
+        The exact Optimist scenario: Jan 21 and Jan 22 should overlap via adjacent keys.
+
+        Bug: "Optimist" (accel, SEED, Jan 22) was created twice because:
+        - Jan 21 = day 20474, bucket 6824
+        - Jan 22 = day 20475, bucket 6825
+        Different buckets → different dedup_keys → duplicate created.
+
+        Fix: Adjacent bucket keys catch this boundary case.
+        """
+        key_jan21 = make_dedup_key("Optimist", "seed", date(2026, 1, 21))
+        key_jan22 = make_dedup_key("Optimist", "seed", date(2026, 1, 22))
+
+        # Primary keys differ (this is the bug we're fixing)
+        assert key_jan21 != key_jan22, "Primary keys differ due to bucket boundary"
+
+        # Adjacent keys from Jan 22 should include Jan 21's bucket
+        adjacent_jan22 = get_adjacent_bucket_keys("Optimist", "seed", date(2026, 1, 22))
+        assert key_jan21 in adjacent_jan22, "Adjacent keys from Jan 22 should catch Jan 21"
+
+        # And vice versa - adjacent keys from Jan 21 should include Jan 22's bucket
+        adjacent_jan21 = get_adjacent_bucket_keys("Optimist", "seed", date(2026, 1, 21))
+        assert key_jan22 in adjacent_jan21, "Adjacent keys from Jan 21 should catch Jan 22"
+
+    def test_adjacent_keys_returns_two_keys(self):
+        """Adjacent keys should return exactly 2 keys (±1 bucket)."""
+        keys = get_adjacent_bucket_keys("TestCo", "series_a", date(2026, 1, 15))
+        assert len(keys) == 2
+
+    def test_adjacent_keys_all_valid_md5(self):
+        """All adjacent keys should be valid 32-char MD5 hex strings."""
+        keys = get_adjacent_bucket_keys("TestCo", "series_a", date(2026, 1, 15))
+        for key in keys:
+            assert len(key) == 32
+            assert all(c in '0123456789abcdef' for c in key)
+
+    def test_adjacent_keys_none_date(self):
+        """Adjacent keys with None date should work with month buckets."""
+        keys = get_adjacent_bucket_keys("TestCo", "series_a", None)
+        assert len(keys) == 2
+        # Keys should contain 'nodate_' pattern
+        # We can't easily verify the bucket number without reimplementing the logic
+
+    def test_bucket_boundary_dates(self):
+        """Test various bucket boundary scenarios."""
+        # Days that fall on bucket boundaries (every 3 days)
+        # Day 20466 (Jan 13, 2026) is bucket 6822
+        # Day 20469 (Jan 16, 2026) is bucket 6823
+
+        key_jan13 = make_dedup_key("BoundaryCo", "seed", date(2026, 1, 13))
+        key_jan16 = make_dedup_key("BoundaryCo", "seed", date(2026, 1, 16))
+
+        # These are in different buckets
+        assert key_jan13 != key_jan16
+
+        # But adjacent keys should catch each other
+        adjacent_jan16 = get_adjacent_bucket_keys("BoundaryCo", "seed", date(2026, 1, 16))
+        # Jan 13 is in bucket 6822, Jan 16 is in bucket 6823
+        # Adjacent to 6823 are 6822 and 6824
+        assert key_jan13 in adjacent_jan16, "Jan 13 should be in adjacent keys for Jan 16"
+
+    def test_same_bucket_not_in_adjacent(self):
+        """The primary key's bucket should NOT be in adjacent keys."""
+        primary_key = make_dedup_key("TestCo", "series_a", date(2026, 1, 15))
+        adjacent_keys = get_adjacent_bucket_keys("TestCo", "series_a", date(2026, 1, 15))
+
+        # Primary key should never equal any adjacent key
+        assert primary_key not in adjacent_keys
+
+    def test_different_round_type_different_adjacent_keys(self):
+        """Different round types should produce different adjacent keys."""
+        keys_seed = get_adjacent_bucket_keys("TestCo", "seed", date(2026, 1, 15))
+        keys_series_a = get_adjacent_bucket_keys("TestCo", "series_a", date(2026, 1, 15))
+
+        # No overlap between different round types
+        assert not set(keys_seed).intersection(set(keys_series_a))
 
 
 if __name__ == "__main__":
