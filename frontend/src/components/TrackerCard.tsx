@@ -4,25 +4,43 @@
  */
 
 import { useSortable } from '@dnd-kit/sortable';
+import { useDroppable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, ExternalLink, Calendar, Link } from 'lucide-react';
 import type { TrackerItem } from '../types';
 
 interface TrackerCardProps {
   item: TrackerItem;
+  columnSlug: string;
   isDragging?: boolean;
   onClick?: () => void;
 }
 
-export function TrackerCard({ item, isDragging, onClick }: TrackerCardProps) {
+export function TrackerCard({ item, columnSlug, isDragging, onClick }: TrackerCardProps) {
   const {
     attributes,
     listeners,
-    setNodeRef,
+    setNodeRef: setSortableRef,
     transform,
     transition,
     isDragging: isSortableDragging,
-  } = useSortable({ id: item.id });
+  } = useSortable({
+    id: item.id,
+    data: { columnSlug },
+  });
+
+  // Add useDroppable with a unique ID that includes the column
+  // This provides reliable access to column data during cross-column drags
+  const { setNodeRef: setDroppableRef } = useDroppable({
+    id: `card-drop-${item.id}`,
+    data: { columnSlug, itemId: item.id },
+  });
+
+  // Combine refs so both sortable and droppable work on the same element
+  const setNodeRef = (node: HTMLElement | null) => {
+    setSortableRef(node);
+    setDroppableRef(node);
+  };
 
   const style = {
     transform: CSS.Transform.toString(transform),

@@ -12,7 +12,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   DndContext,
   DragOverlay,
-  closestCorners,
+  rectIntersection,
   KeyboardSensor,
   PointerSensor,
   useSensor,
@@ -48,12 +48,12 @@ export function Tracker() {
   const [items, setItems] = useState<TrackerItem[]>([]);
   const [columns, setColumns] = useState<TrackerColumnType[]>([]);
   const [stats, setStats] = useState<TrackerStats | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeItem, setActiveItem] = useState<TrackerItem | null>(null);
   const [modalItem, setModalItem] = useState<TrackerItem | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
+  const [overColumnId, setOverColumnId] = useState<string | null>(null);
   // Column modal state
   const [isColumnModalOpen, setIsColumnModalOpen] = useState(false);
   const [editingColumn, setEditingColumn] = useState<TrackerColumnType | null>(null);
@@ -83,15 +83,12 @@ export function Tracker() {
 
   const loadItems = useCallback(async () => {
     try {
-      setIsLoading(true);
       setError(null);
       const response = await fetchTrackerItems();
       setItems(response.items);
       setStats(response.stats);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load tracker items');
-    } finally {
-      setIsLoading(false);
     }
   }, []);
 
@@ -117,15 +114,60 @@ export function Tracker() {
     }
   };
 
-  const handleDragOver = (_event: DragOverEvent) => {
-    // Don't update state during drag - causes flickering and race conditions
-    // The visual feedback is handled by dnd-kit's DragOverlay
-    // State is updated only in handleDragEnd after drop completes
+  const handleDragOver = (event: DragOverEvent) => {
+    const { over } = event;
+    if (!over) {
+      setOverColumnId(null);
+      return;
+    }
+
+    const overId = over.id;
+    const columnSlugs = columns.map((c) => c.slug);
+
+    // Check if hovering over a column background directly
+    if (columnSlugs.includes(String(overId))) {
+      setOverColumnId(String(overId));
+      return;
+    }
+
+    // Check droppable/sortable data for columnSlug (handles card-drop-* IDs too)
+    // This is the most reliable method for cross-column drags
+    const columnSlug = over.data?.current?.columnSlug;
+    if (columnSlug && columnSlugs.includes(columnSlug)) {
+      setOverColumnId(columnSlug);
+      return;
+    }
+
+    // Fallback: sortable container ID
+    const containerId = over.data?.current?.sortable?.containerId;
+    if (containerId && columnSlugs.includes(containerId)) {
+      setOverColumnId(containerId);
+      return;
+    }
+
+    // Last fallback: look up item in state
+    // Handle both numeric IDs and "card-drop-123" format
+    const itemId = String(overId).startsWith('card-drop-')
+      ? Number(String(overId).replace('card-drop-', ''))
+      : Number(overId);
+
+    const overItem = items.find((i) => i.id === itemId);
+    if (overItem) {
+      setOverColumnId(overItem.status);
+    } else {
+      setOverColumnId(null);
+    }
+  };
+
+  const handleDragCancel = () => {
+    setActiveItem(null);
+    setOverColumnId(null);
   };
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveItem(null);
+    setOverColumnId(null);
 
     if (!over) return;
 
@@ -136,57 +178,96 @@ export function Tracker() {
     let targetPosition: number;
 
     const columnSlugs = columns.map((c) => c.slug);
+
     if (columnSlugs.includes(over.id as string)) {
-      // Dropped on a column
+      // Dropped on a column background - position at end
       targetStatus = over.id as TrackerStatus;
       const columnItems = getItemsByStatus(targetStatus);
-      targetPosition = columnItems.length;
+      // Position at end (excluding self if same column)
+      targetPosition = draggedItem.status === targetStatus
+        ? Math.max(0, columnItems.length - 1)
+        : columnItems.length;
     } else {
-      // Dropped on another card
+      // Dropped on a card - insert at that card's position
       const overItem = items.find((i) => i.id === over.id);
       if (!overItem) return;
 
       targetStatus = overItem.status;
       const columnItems = getItemsByStatus(targetStatus);
       const overIndex = columnItems.findIndex((i) => i.id === over.id);
+
+      // Insert at the position of the target card
       targetPosition = overIndex >= 0 ? overIndex : columnItems.length;
+
+      // Adjust for same-column drag from before the target
+      if (draggedItem.status === targetStatus) {
+        const draggedIndex = columnItems.findIndex((i) => i.id === draggedItem.id);
+        if (draggedIndex >= 0 && draggedIndex < targetPosition) {
+          targetPosition = targetPosition - 1;
+        }
+      }
     }
+
+    // Clamp to valid range
+    targetPosition = Math.max(0, targetPosition);
 
     // Skip if no actual change
     if (draggedItem.status === targetStatus && draggedItem.position === targetPosition) {
       return;
     }
 
-    // Store previous state for rollback
+    // Store previous state for rollback on error
     const previousItems = [...items];
 
-    // Update local state optimistically (instant feedback)
+    // Optimistic update: immediately update UI
     setItems((prev) => {
-      const updated = prev.map((item) =>
-        item.id === draggedItem.id
-          ? { ...item, status: targetStatus, position: targetPosition }
-          : item
-      );
-      // Re-sort positions within the column
-      const columnItems = updated
+      // Remove dragged item from current position
+      const withoutDragged = prev.filter((item) => item.id !== draggedItem.id);
+
+      // Get items in the target column (excluding dragged item)
+      const targetColumnItems = withoutDragged
         .filter((i) => i.status === targetStatus)
         .sort((a, b) => a.position - b.position);
 
-      return updated.map((item) => {
-        if (item.status === targetStatus) {
-          const idx = columnItems.findIndex((c) => c.id === item.id);
-          return { ...item, position: idx };
+      // Build new target column with correct positions
+      const newTargetColumnItems: TrackerItem[] = [];
+      let inserted = false;
+
+      for (let i = 0; i < targetColumnItems.length; i++) {
+        if (i === targetPosition && !inserted) {
+          newTargetColumnItems.push({
+            ...draggedItem,
+            status: targetStatus,
+            position: newTargetColumnItems.length,
+          });
+          inserted = true;
         }
-        return item;
-      });
+        newTargetColumnItems.push({
+          ...targetColumnItems[i],
+          position: newTargetColumnItems.length,
+        });
+      }
+
+      // If not inserted yet (position is at end), append
+      if (!inserted) {
+        newTargetColumnItems.push({
+          ...draggedItem,
+          status: targetStatus,
+          position: newTargetColumnItems.length,
+        });
+      }
+
+      // Combine: other columns unchanged + renumbered target column
+      const otherColumnItems = withoutDragged.filter((i) => i.status !== targetStatus);
+      return [...otherColumnItems, ...newTargetColumnItems];
     });
 
-    // Sync with backend (async, don't block UI)
+    // Sync with backend
     try {
       await moveTrackerItem(draggedItem.id, targetStatus, targetPosition);
     } catch (err) {
       console.error('Failed to move item:', err);
-      // Rollback to previous state instead of full reload
+      // Rollback on error
       setItems(previousItems);
       setError('Failed to move item. Please try again.');
       setTimeout(() => setError(null), 3000);
@@ -339,15 +420,6 @@ export function Tracker() {
     }
   };
 
-  if (isLoading) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full gap-3">
-        <RefreshCw className="w-6 h-6 text-slate-400 animate-spin" />
-        <span className="text-slate-500 text-sm">Loading your pipeline...</span>
-      </div>
-    );
-  }
-
   return (
     <div className="flex flex-col flex-1 min-h-0">
       {/* Header */}
@@ -402,10 +474,11 @@ export function Tracker() {
       <div className="flex-1 min-h-0 overflow-auto p-4 sm:p-6">
         <DndContext
           sensors={sensors}
-          collisionDetection={closestCorners}
+          collisionDetection={rectIntersection}
           onDragStart={handleDragStart}
           onDragOver={handleDragOver}
           onDragEnd={handleDragEnd}
+          onDragCancel={handleDragCancel}
         >
           <div className="flex gap-3 sm:gap-4 min-h-full pb-4" style={{ minWidth: 'max-content' }}>
             {columns.map((column) => {
@@ -418,6 +491,7 @@ export function Tracker() {
                   count={columnItems.length}
                   isFirst={column.position === 0}
                   isLast={column.position === columns.length - 1}
+                  isDropTarget={overColumnId === column.slug && activeItem !== null}
                   onEditItem={handleEditItem}
                   onEditColumn={handleEditColumn}
                   onMoveLeft={handleMoveColumnLeft}
@@ -438,7 +512,7 @@ export function Tracker() {
 
           <DragOverlay>
             {activeItem ? (
-              <TrackerCard item={activeItem} isDragging />
+              <TrackerCard item={activeItem} columnSlug={activeItem.status} isDragging />
             ) : null}
           </DragOverlay>
         </DndContext>

@@ -30,9 +30,11 @@ interface DealCardProps {
   deal: Deal;
   onClick: () => void;
   showRejected?: boolean;
+  isSelected?: boolean;
+  cardRef?: (el: HTMLDivElement | null) => void;
 }
 
-export const DealCard = memo(function DealCard({ deal, onClick, showRejected = false }: DealCardProps) {
+export const DealCard = memo(function DealCard({ deal, onClick, showRejected = false, isSelected = false, cardRef }: DealCardProps) {
   const isRejected = !deal.investorRoles.includes('lead');
   const shouldDim = isRejected && !showRejected;
 
@@ -45,10 +47,11 @@ export const DealCard = memo(function DealCard({ deal, onClick, showRejected = f
 
   return (
     <div
+      ref={cardRef}
       onClick={onClick}
-      className={`bg-slate-900/50 border border-slate-800 rounded-lg p-4 cursor-pointer active:bg-slate-800/50 transition-colors ${
+      className={`bg-slate-900/50 border rounded-lg p-4 cursor-pointer active:bg-slate-800/50 transition-colors ${
         shouldDim ? 'opacity-60' : ''
-      }`}
+      } ${isSelected ? 'border-blue-500/50 bg-slate-800/50 ring-1 ring-blue-500/30' : 'border-slate-800'}`}
     >
       {/* Top row: Company name + Amount */}
       <div className="flex items-start justify-between gap-2 mb-2">
@@ -79,7 +82,7 @@ export const DealCard = memo(function DealCard({ deal, onClick, showRejected = f
 
       {/* Bottom row: Category + Links */}
       <div className="flex items-center justify-between">
-        <CategoryBadge category={deal.enterpriseCategory} shouldDim={shouldDim} />
+        <CategoryBadge category={deal.enterpriseCategory} shouldDim={shouldDim} isRejected={isRejected} />
 
         <div className="flex items-center gap-2">
           {/* Website */}
@@ -161,18 +164,21 @@ const CATEGORY_ICONS: Record<EnterpriseCategory, React.ReactNode> = {
 function CategoryBadge({
   category,
   shouldDim,
+  isRejected,
 }: {
   category?: EnterpriseCategory;
   shouldDim: boolean;
+  isRejected?: boolean;
 }) {
   const cat = category || 'other';
-  const icon = CATEGORY_ICONS[cat] || CATEGORY_ICONS['other'];
   const isConsumerAi = cat === 'consumer_ai' || cat === 'gaming_ai' || cat === 'social_ai';
   const isNonAi = ['crypto', 'fintech', 'healthcare', 'hardware', 'saas', 'other', 'not_ai'].includes(cat);
 
-  // Non-AI categories get their specific styling
+  // Non-AI categories: only show specific label if NOT rejected (is a lead)
+  // Rejected non-AI deals just show "other"
   if (isNonAi) {
-    const displayCat = cat === 'not_ai' ? 'other' : cat;
+    const displayCat = (isRejected || cat === 'not_ai') ? 'other' : cat;
+    const icon = CATEGORY_ICONS[displayCat] || CATEGORY_ICONS['other'];
     return (
       <div className={`category-badge category-${displayCat} text-[10px]`}>
         {icon}
@@ -180,6 +186,8 @@ function CategoryBadge({
       </div>
     );
   }
+
+  const icon = CATEGORY_ICONS[cat] || CATEGORY_ICONS['other'];
 
   if (isConsumerAi) {
     return (
