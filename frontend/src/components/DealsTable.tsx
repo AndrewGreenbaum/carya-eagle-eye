@@ -10,7 +10,7 @@
  * - Click to open modal
  */
 
-import React, { memo } from 'react';
+import React, { memo, useRef, useEffect } from 'react';
 import {
   Link,
   FileText,
@@ -50,6 +50,8 @@ interface DealsTableProps {
   sortDirection: SortDirection;
   onSortChange: (direction: SortDirection) => void;
   showRejected?: boolean;
+  selectedIndex?: number;
+  scrollTrigger?: number;
 }
 
 export function DealsTable({
@@ -63,9 +65,28 @@ export function DealsTable({
   sortDirection,
   onSortChange,
   showRejected = false,
+  selectedIndex = -1,
+  scrollTrigger = 0,
 }: DealsTableProps) {
   const currentPage = Math.floor(pagination.offset / pagination.limit) + 1;
   const totalPages = Math.ceil(pagination.total / pagination.limit);
+
+  // Refs for scrolling to selected row
+  const rowRefs = useRef<Map<number, HTMLElement>>(new Map());
+
+  // Scroll to selected row when scrollTrigger changes (e.g., modal closes)
+  useEffect(() => {
+    if (scrollTrigger > 0 && selectedIndex >= 0) {
+      // Small delay to ensure scroll happens after modal's focus restoration
+      const timer = setTimeout(() => {
+        const row = rowRefs.current.get(selectedIndex);
+        if (row) {
+          row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [scrollTrigger, selectedIndex]);
 
   return (
     <>
@@ -101,13 +122,18 @@ export function DealsTable({
       </div>
 
       {/* Mobile Card View */}
-      <div className="md:hidden flex-1 overflow-auto p-4 space-y-3">
-        {deals.map((deal) => (
+      <div className="md:hidden flex-1 overflow-auto scrollbar-hide p-4 space-y-3">
+        {deals.map((deal, index) => (
           <DealCard
             key={deal.id}
             deal={deal}
             onClick={() => onDealClick(deal)}
             showRejected={showRejected}
+            isSelected={index === selectedIndex}
+            cardRef={(el) => {
+              if (el) rowRefs.current.set(index, el);
+              else rowRefs.current.delete(index);
+            }}
           />
         ))}
         {deals.length === 0 && (
@@ -118,7 +144,7 @@ export function DealsTable({
       </div>
 
       {/* Desktop Table View */}
-      <div className="hidden md:block flex-1 overflow-auto">
+      <div className="hidden md:block flex-1 overflow-auto scrollbar-hide">
         <table className="w-full text-left border-collapse">
           <thead className="bg-[#0a0a0c] sticky top-0 z-10 text-[10px] uppercase font-bold text-slate-500">
             <tr>
@@ -154,8 +180,18 @@ export function DealsTable({
             </tr>
           </thead>
           <tbody className="text-xs divide-y divide-slate-800/50">
-            {deals.map((deal) => (
-              <DealRow key={deal.id} deal={deal} onClick={() => onDealClick(deal)} showRejected={showRejected} />
+            {deals.map((deal, index) => (
+              <DealRow
+                key={deal.id}
+                deal={deal}
+                onClick={() => onDealClick(deal)}
+                showRejected={showRejected}
+                isSelected={index === selectedIndex}
+                rowRef={(el) => {
+                  if (el) rowRefs.current.set(index, el);
+                  else rowRefs.current.delete(index);
+                }}
+              />
             ))}
             {deals.length === 0 && (
               <tr>
@@ -208,9 +244,11 @@ interface DealRowProps {
   deal: Deal;
   onClick: () => void;
   showRejected?: boolean;
+  isSelected?: boolean;
+  rowRef?: (el: HTMLTableRowElement | null) => void;
 }
 
-const DealRow = memo(function DealRow({ deal, onClick, showRejected = false }: DealRowProps) {
+const DealRow = memo(function DealRow({ deal, onClick, showRejected = false, isSelected = false, rowRef }: DealRowProps) {
   // A deal is "rejected" only if not led by a tracked fund
   // AI classification is informational, not a rejection criteria
   const isRejected = !deal.investorRoles.includes('lead');
@@ -219,10 +257,11 @@ const DealRow = memo(function DealRow({ deal, onClick, showRejected = false }: D
 
   return (
     <tr
+      ref={rowRef}
       onClick={onClick}
       className={`deal-row cursor-pointer group ${
         shouldDim ? 'opacity-50 grayscale hover:grayscale-0 hover:opacity-100' : ''
-      }`}
+      } ${isSelected ? 'bg-slate-800/50 ring-1 ring-inset ring-blue-500/30' : ''}`}
     >
       {/* Company / Source */}
       <td className="px-6 py-4">
@@ -251,7 +290,7 @@ const DealRow = memo(function DealRow({ deal, onClick, showRejected = false }: D
 
       {/* AI Category */}
       <td className="px-6 py-4">
-        <CategoryBadge category={deal.enterpriseCategory} shouldDim={shouldDim} />
+        <CategoryBadge category={deal.enterpriseCategory} shouldDim={shouldDim} isRejected={isRejected} />
       </td>
 
       {/* Company Links */}
@@ -319,20 +358,23 @@ const CATEGORY_ICONS: Record<EnterpriseCategory, React.ReactNode> = {
 function CategoryBadge({
   category,
   shouldDim,
+  isRejected,
 }: {
   category?: EnterpriseCategory;
   shouldDim: boolean;
+  isRejected?: boolean;
 }) {
   const cat = category || 'other';
-  const icon = CATEGORY_ICONS[cat] || CATEGORY_ICONS['other'];
 
   // Check if it's a consumer AI category
   const isConsumerAi = cat === 'consumer_ai' || cat === 'gaming_ai' || cat === 'social_ai';
   const isNonAi = ['crypto', 'fintech', 'healthcare', 'hardware', 'saas', 'other', 'not_ai'].includes(cat);
 
-  // Non-AI categories get their specific styling
+  // Non-AI categories: only show specific label if NOT rejected (is a lead)
+  // Rejected non-AI deals just show "other"
   if (isNonAi) {
-    const displayCat = cat === 'not_ai' ? 'other' : cat;
+    const displayCat = (isRejected || cat === 'not_ai') ? 'other' : cat;
+    const icon = CATEGORY_ICONS[displayCat] || CATEGORY_ICONS['other'];
     return (
       <div className={`category-badge category-${displayCat}`}>
         {icon}
@@ -340,6 +382,8 @@ function CategoryBadge({
       </div>
     );
   }
+
+  const icon = CATEGORY_ICONS[cat] || CATEGORY_ICONS['other'];
 
   // Consumer AI gets a different style
   if (isConsumerAi) {

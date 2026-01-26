@@ -11,7 +11,7 @@
  * Command Center dark theme
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { CommandHeader } from './components/CommandHeader';
 import { CommandSidebar } from './components/CommandSidebar';
@@ -39,6 +39,8 @@ import {
   fetchTokenUsage,
   invalidateCache,
   getExportUrl,
+  ApiTimeoutError,
+  addDealToTracker,
 } from './api/deals';
 import type {
   Deal,
@@ -186,6 +188,15 @@ function App() {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [aircraftTrackerOpen, setAircraftTrackerOpen] = useState(false);
 
+
+  // Keyboard navigation state
+  const [selectedDealIdx, setSelectedDealIdx] = useState<number>(-1);
+  const [copiedDeal, setCopiedDeal] = useState<Deal | null>(null);
+  const [pasteToast, setPasteToast] = useState<string | null>(null);
+
+  // Ref to save scroll position when modal opens
+  const savedScrollPos = useRef<number>(0);
+
   // Debounce search query
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -312,15 +323,20 @@ function App() {
 
         setError(null);
       } catch (err) {
-        console.warn('API unavailable, using sample data:', err);
-        setPagination({
-          deals: sampleDeals,
-          total: sampleDeals.length,
-          limit: PAGE_SIZE,
-          offset: 0,
-          hasMore: false,
-        });
-        setError('Using sample data (API unavailable)');
+        console.error('Failed to fetch deals:', err);
+
+        if (err instanceof ApiTimeoutError) {
+          setError('Request timed out. Server may be busy with scans. Click Retry to refresh.');
+        } else {
+          setPagination({
+            deals: sampleDeals,
+            total: sampleDeals.length,
+            limit: PAGE_SIZE,
+            offset: 0,
+            hasMore: false,
+          });
+          setError('Failed to load deals. Using sample data.');
+        }
       } finally {
         setLoading(false);
       }
@@ -344,6 +360,102 @@ function App() {
     const interval = setInterval(loadSystemStatus, 60000);
     return () => clearInterval(interval);
   }, [loadSystemStatus]);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      // Skip if user is typing in an input or textarea
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      // Skip if any modal is open (except for modal-specific shortcuts)
+      if (selectedDeal || feedbackOpen || aircraftTrackerOpen || settingsOpen) return;
+
+      // View switching (no modifiers)
+      if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (e.key === '1') {
+          e.preventDefault();
+          setCurrentView('dashboard');
+          return;
+        } else if (e.key === '2') {
+          e.preventDefault();
+          setCurrentView('tracker');
+          return;
+        }
+      }
+
+      // Dashboard navigation (only when on dashboard)
+      if (currentView === 'dashboard') {
+        if (e.key === 'j' || e.key === 'ArrowDown') {
+          e.preventDefault();
+          setSelectedDealIdx((prev) => {
+            const maxIdx = pagination.deals.length - 1;
+            const newIdx = prev < 0 ? 0 : Math.min(prev + 1, maxIdx);
+            // Scroll the new row into view (center it to avoid header overlap)
+            requestAnimationFrame(() => {
+              const rows = document.querySelectorAll('tr.deal-row');
+              if (rows[newIdx]) {
+                rows[newIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            });
+            return newIdx;
+          });
+        } else if (e.key === 'k' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          setSelectedDealIdx((prev) => {
+            const newIdx = Math.max(prev - 1, 0);
+            // Scroll the new row into view (center it to avoid header overlap)
+            requestAnimationFrame(() => {
+              const rows = document.querySelectorAll('tr.deal-row');
+              if (rows[newIdx]) {
+                rows[newIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            });
+            return newIdx;
+          });
+        } else if (e.key === 'Enter' && selectedDealIdx >= 0) {
+          e.preventDefault();
+          const deal = pagination.deals[selectedDealIdx];
+          if (deal) setSelectedDeal(deal);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          setSelectedDealIdx(-1);
+        }
+      }
+
+      // Ctrl+V to paste copied deal to tracker
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v' && copiedDeal) {
+        e.preventDefault();
+        addDealToTracker(parseInt(copiedDeal.id), 'watching')
+          .then(() => {
+            setPasteToast(`Added ${copiedDeal.startupName} to tracker`);
+            setTimeout(() => setPasteToast(null), 3000);
+            setCopiedDeal(null);
+          })
+          .catch((err) => {
+            console.error('Failed to paste deal:', err);
+            setPasteToast('Failed to add to tracker');
+            setTimeout(() => setPasteToast(null), 3000);
+          });
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    currentView,
+    selectedDeal,
+    feedbackOpen,
+    aircraftTrackerOpen,
+    settingsOpen,
+    selectedDealIdx,
+    pagination.deals,
+    copiedDeal,
+  ]);
+
+  // Reset selection when deals change (page change, filter change)
+  useEffect(() => {
+    setSelectedDealIdx(-1);
+  }, [pagination.offset, filters]);
 
   const handleRefresh = () => {
     invalidateCache();
@@ -372,6 +484,20 @@ function App() {
     // Update sort direction in filters - this triggers API refetch via useEffect
     setFilters((prev) => ({ ...prev, sortDirection: direction }));
   }, []);
+
+  // Handle deal click - set both selected deal and index
+  const handleDealClick = useCallback((deal: Deal) => {
+    const idx = pagination.deals.findIndex((d) => d.id === deal.id);
+    if (idx !== -1) {
+      setSelectedDealIdx(idx);
+    }
+    // Save scroll position before opening modal
+    const tableContainer = document.querySelector('.overflow-auto.scrollbar-hide');
+    if (tableContainer) {
+      savedScrollPos.current = tableContainer.scrollTop;
+    }
+    setSelectedDeal(deal);
+  }, [pagination.deals]);
 
   return (
     <div className="h-screen flex flex-col bg-[#050506] text-slate-300 font-['JetBrains_Mono',monospace]">
@@ -479,7 +605,7 @@ function App() {
                   <DealsTable
                     deals={pagination.deals}
                     pagination={pagination}
-                    onDealClick={setSelectedDeal}
+                    onDealClick={handleDealClick}
                     onExport={handleExport}
                     onRefresh={handleRefresh}
                     onPageChange={handlePageChange}
@@ -487,6 +613,7 @@ function App() {
                     sortDirection={filters.sortDirection}
                     onSortChange={handleSortChange}
                     showRejected={filters.showRejected}
+                    selectedIndex={selectedDealIdx}
                   />
                 </ErrorBoundary>
               </div>
@@ -532,8 +659,29 @@ function App() {
 
       {/* Deal Modal */}
       {selectedDeal && (
-        <DealModal deal={selectedDeal} onClose={() => setSelectedDeal(null)} />
+        <DealModal
+          deal={selectedDeal}
+          onClose={() => {
+            setSelectedDeal(null);
+            // Restore scroll position after modal closes
+            requestAnimationFrame(() => {
+              const tableContainer = document.querySelector('.overflow-auto.scrollbar-hide');
+              if (tableContainer) {
+                tableContainer.scrollTop = savedScrollPos.current;
+              }
+            });
+          }}
+          onCopy={setCopiedDeal}
+        />
       )}
+
+      {/* Paste Toast */}
+      {pasteToast && (
+        <div className="fixed bottom-4 right-4 bg-slate-800 text-white px-4 py-2 rounded-lg shadow-lg z-50 animate-fade-in">
+          {pasteToast}
+        </div>
+      )}
+
 
       {/* Feedback Modal */}
       {feedbackOpen && (

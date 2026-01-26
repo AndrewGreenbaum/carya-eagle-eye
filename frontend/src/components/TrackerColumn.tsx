@@ -22,6 +22,7 @@ interface TrackerColumnProps {
   count: number;
   isFirst: boolean;
   isLast: boolean;
+  isDropTarget?: boolean;
   onEditItem: (item: TrackerItem) => void;
   onEditColumn: (column: TrackerColumnType) => void;
   onMoveLeft: (column: TrackerColumnType) => void;
@@ -35,6 +36,7 @@ export function TrackerColumn({
   count,
   isFirst,
   isLast,
+  isDropTarget = false,
   onEditItem,
   onEditColumn,
   onMoveLeft,
@@ -46,6 +48,7 @@ export function TrackerColumn({
   });
 
   const colorClasses = TRACKER_COLOR_CLASSES[column.color] || TRACKER_COLOR_CLASSES.slate;
+  const showDropIndicator = isDropTarget || isOver;
 
   return (
     <div className="flex flex-col w-64 sm:w-72 shrink-0 group">
@@ -99,10 +102,11 @@ export function TrackerColumn({
         role="region"
         aria-label={`${column.displayName} column, ${count} items`}
         className={`flex-1 rounded-lg p-2 transition-colors min-h-[200px] ${
-          isOver ? 'bg-slate-800/50 ring-2 ring-emerald-500/30' : 'bg-slate-900/30'
+          showDropIndicator ? 'bg-slate-800/50' : 'bg-slate-900/30'
         }`}
       >
         <SortableContext
+          id={column.slug}
           items={items.map((i) => i.id)}
           strategy={verticalListSortingStrategy}
         >
@@ -111,14 +115,15 @@ export function TrackerColumn({
               <TrackerCard
                 key={item.id}
                 item={item}
+                columnSlug={column.slug}
                 onClick={() => onEditItem(item)}
               />
             ))}
           </div>
         </SortableContext>
 
-        {/* Empty State */}
-        {items.length === 0 && (
+        {/* Empty State - only show when not dragging over */}
+        {items.length === 0 && !showDropIndicator && (
           <div className="flex flex-col items-center justify-center h-24 text-center px-4">
             <span className="text-slate-500 text-sm">No items</span>
             <span className="text-slate-600 text-xs mt-1">
