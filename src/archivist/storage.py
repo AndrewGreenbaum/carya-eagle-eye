@@ -125,11 +125,12 @@ def make_dedup_key(company_name: str, round_type: str, announced_date: Optional[
         date_bucket = days_since_epoch // 3
         date_str = str(date_bucket)
     else:
-        # For deals without dates, use "nodate" + current week bucket
-        # This catches race condition duplicates created within the same week
+        # For deals without dates, use "nodate" + current month bucket
+        # This catches race condition duplicates created within the same ~30-day period
+        # FIX (2026-01 Optimist bug): Changed from weekly to monthly to reduce edge case duplicates
         today = date.today()
-        week_bucket = (today - date(1970, 1, 1)).days // 7
-        date_str = f"nodate_{week_bucket}"
+        month_bucket = (today - date(1970, 1, 1)).days // 30
+        date_str = f"nodate_{month_bucket}"
 
     key_data = f"{normalized_name}|{round_type}|{date_str}"
     return hashlib.md5(key_data.encode()).hexdigest()
@@ -186,12 +187,50 @@ def make_amount_dedup_key(company_name: str, amount_usd: Optional[int], announce
         date_bucket = days_since_epoch // 3
         date_str = str(date_bucket)
     else:
+        # FIX (2026-01 Optimist bug): Changed from weekly to monthly bucket for consistency
         today = date.today()
-        week_bucket = (today - date(1970, 1, 1)).days // 7
-        date_str = f"nodate_{week_bucket}"
+        month_bucket = (today - date(1970, 1, 1)).days // 30
+        date_str = f"nodate_{month_bucket}"
 
     key_data = f"{normalized_name}|amt{amount_bucket}|{date_str}"
     return hashlib.md5(key_data.encode()).hexdigest()
+
+
+def get_adjacent_bucket_keys(company_name: str, round_type: str, announced_date: Optional[date]) -> list[str]:
+    """
+    Generate dedup_keys for adjacent date buckets to catch boundary cases.
+
+    FIX (2026-01 Optimist bug): Jan 21 (bucket 6824) and Jan 22 (bucket 6825) land in
+    different 3-day buckets, generating different dedup_keys. This helper generates
+    keys for adjacent buckets so we can check for near-duplicates across bucket boundaries.
+
+    Args:
+        company_name: Company name (will be normalized)
+        round_type: Round type (seed, series_a, etc.)
+        announced_date: Announced date (or None for null-date deals)
+
+    Returns:
+        List of dedup_keys for adjacent buckets (typically 2 keys for ±1 bucket)
+    """
+    normalized_name = _normalize_company_name_for_dedup(company_name)
+    adjacent_keys = []
+
+    if announced_date:
+        days_since_epoch = (announced_date - date(1970, 1, 1)).days
+        primary_bucket = days_since_epoch // 3
+        for bucket_offset in [-1, 1]:
+            adjacent_bucket = primary_bucket + bucket_offset
+            key_data = f"{normalized_name}|{round_type}|{adjacent_bucket}"
+            adjacent_keys.append(hashlib.md5(key_data.encode()).hexdigest())
+    else:
+        today = date.today()
+        primary_month_bucket = (today - date(1970, 1, 1)).days // 30
+        for bucket_offset in [-1, 1]:
+            adjacent_bucket = primary_month_bucket + bucket_offset
+            key_data = f"{normalized_name}|{round_type}|nodate_{adjacent_bucket}"
+            adjacent_keys.append(hashlib.md5(key_data.encode()).hexdigest())
+
+    return adjacent_keys
 
 
 # ----- URL Validation (FIX #1: Use shared module) -----
@@ -769,11 +808,12 @@ async def find_duplicate_deal(
     normalized_company = normalize_company_name(company_name)
 
     # =========================================================================
-    # TIER 0 (NEW): Exact company name + same round + date within ±3 days
+    # TIER 0 (NEW): Exact company name + same round + date within ±5 days
     # This is the most aggressive tier to catch race condition duplicates.
     # When multiple articles about the same deal are processed in parallel,
     # the duplicate check may run before the first deal is committed.
     # This tier catches: Torq Series D Jan 11 vs Jan 12, Protege Series A same day
+    # FIX (2026-01 Optimist bug): Expanded from ±3 to ±5 days to catch bucket boundaries
     # =========================================================================
     tier0_stmt = (
         select(Deal, PortfolioCompany)
@@ -782,28 +822,31 @@ async def find_duplicate_deal(
         .where(Deal.round_type == round_type)
     )
 
-    # Date filter: within ±3 days, or both null (recent deals)
+    # Date filter: within ±5 days, or both null (recent deals)
+    # FIX (2026-01): Expanded from ±3 to ±5 days to catch 3-day bucket boundaries
     if announced_date:
         tier0_stmt = tier0_stmt.where(
             or_(
                 Deal.announced_date.between(
-                    announced_date - timedelta(days=3),
-                    announced_date + timedelta(days=3)
+                    announced_date - timedelta(days=5),
+                    announced_date + timedelta(days=5)
                 ),
                 # Also match deals with null date if they're recent
+                # FIX (2026-01): Expanded from 7 to 10 days for null-date deals
                 and_(
                     Deal.announced_date.is_(None),
-                    Deal.created_at >= (datetime.now(timezone.utc) - timedelta(days=7)).replace(tzinfo=None)
+                    Deal.created_at >= (datetime.now(timezone.utc) - timedelta(days=10)).replace(tzinfo=None)
                 )
             )
         )
     else:
         # No date provided: match recent deals with null date or recent dates
-        recent_cutoff_dt = (datetime.now(timezone.utc) - timedelta(days=14)).replace(tzinfo=None)
+        # FIX (2026-01): Expanded from 14 to 21 days for incoming null-date deals
+        recent_cutoff_dt = (datetime.now(timezone.utc) - timedelta(days=21)).replace(tzinfo=None)
         tier0_stmt = tier0_stmt.where(
             or_(
                 Deal.announced_date.is_(None),
-                Deal.announced_date >= (date.today() - timedelta(days=14))
+                Deal.announced_date >= (date.today() - timedelta(days=21))
             )
         ).where(Deal.created_at >= recent_cutoff_dt)
 
@@ -1032,6 +1075,43 @@ async def find_duplicate_deal(
                     f"matches '{company.name}' {deal.round_type} (deal #{deal.id}, "
                     f"amounts: incoming={amount}, existing={deal.amount}) "
                     f"- same round type, recent deal (null incoming date)"
+                )
+                return deal
+
+    # =========================================================================
+    # TIER 2.5 REVERSE: Incoming has date, existing has NULL date
+    # FIX (2026-01 Optimist bug): Catches existing deal with NULL date when incoming has a date.
+    # This handles cases where the first article didn't have a date, but subsequent articles do.
+    # =========================================================================
+    if announced_date:
+        tier25_reverse_stmt = (
+            select(Deal, PortfolioCompany)
+            .join(PortfolioCompany, Deal.company_id == PortfolioCompany.id)
+            .where(Deal.round_type == round_type)
+            .where(Deal.announced_date.is_(None))
+            .where(Deal.created_at >= (datetime.now(timezone.utc) - timedelta(days=30)).replace(tzinfo=None))
+        )
+        tier25_reverse_result = await session.execute(tier25_reverse_stmt)
+        tier25_reverse_candidates = tier25_reverse_result.all()
+
+        for deal, company in tier25_reverse_candidates:
+            if company_names_match(company_name, company.name):
+                # Apply amount sanity check (same as TIER 2.5)
+                if normalized_amount and deal.amount_usd:
+                    larger_amount = max(normalized_amount, deal.amount_usd)
+                    smaller_amount = min(normalized_amount, deal.amount_usd)
+                    ratio = larger_amount / max(1, smaller_amount)
+                    if ratio > 5 and larger_amount < 500_000_000:
+                        logger.debug(
+                            f"TIER 2.5 reverse skip: '{company_name}' amount ratio {ratio:.1f}x too high"
+                        )
+                        continue
+                logger.warning(
+                    f"Found duplicate (TIER 2.5 reverse): '{company_name}' {round_type} "
+                    f"matches '{company.name}' {deal.round_type} (deal #{deal.id}, "
+                    f"amounts: incoming={amount}, existing={deal.amount}, "
+                    f"dates: incoming={announced_date}, existing=NULL) "
+                    f"- existing deal has NULL date, incoming has date"
                 )
                 return deal
 
@@ -1435,6 +1515,39 @@ async def save_deal(
             # Link article to existing deal
             article_stmt = pg_insert(Article).values(
                 deal_id=existing_deal_by_amount.id,
+                url=article_url,
+                title=article_title,
+                source_fund_slug=source_fund_slug,
+                extracted_text=article_text,
+                is_processed=True,
+            ).on_conflict_do_nothing(index_elements=['url'])
+            await session.execute(article_stmt)
+            await session.flush()
+            return None, None  # Signal duplicate
+
+    # FIX Jan 2026 (Optimist bug): Check adjacent bucket keys for date boundary duplicates
+    # Jan 21 (bucket 6824) and Jan 22 (bucket 6825) land in different 3-day buckets,
+    # so the primary dedup_key won't catch them. Check adjacent buckets before INSERT.
+    adjacent_keys = get_adjacent_bucket_keys(
+        extraction.startup_name,
+        extraction.round_label.value,
+        announced_date
+    )
+    if adjacent_keys:
+        existing_by_adjacent = await session.execute(
+            select(Deal).where(Deal.dedup_key.in_(adjacent_keys))
+        )
+        existing_deal_by_adjacent = existing_by_adjacent.scalars().first()
+        if existing_deal_by_adjacent:
+            logger.warning(
+                f"Found duplicate via adjacent bucket key: {extraction.startup_name} "
+                f"{extraction.round_label.value} matches existing deal #{existing_deal_by_adjacent.id} "
+                f"(date: incoming={announced_date}, existing={existing_deal_by_adjacent.announced_date}) "
+                f"- bucket boundary case caught"
+            )
+            # Link article to existing deal
+            article_stmt = pg_insert(Article).values(
+                deal_id=existing_deal_by_adjacent.id,
                 url=article_url,
                 title=article_title,
                 source_fund_slug=source_fund_slug,
