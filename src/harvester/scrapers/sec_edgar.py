@@ -303,7 +303,24 @@ class SECEdgarScraper:
 
         Returns:
             FormDFiling with details populated, or None if fetch failed critically
+
+        FIX 2026-01: Wrapped with per_request_timeout from settings (45s default)
+        to prevent individual filings from hanging the entire pipeline.
         """
+        try:
+            return await asyncio.wait_for(
+                self._fetch_filing_details_impl(filing),
+                timeout=settings.per_request_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"TIMEOUT_SKIP: fetch_filing_details exceeded {settings.per_request_timeout}s "
+                f"for {filing.company_name} (CIK: {filing.cik})"
+            )
+            return None
+
+    async def _fetch_filing_details_impl(self, filing: FormDFiling) -> Optional[FormDFiling]:
+        """Internal implementation of fetch_filing_details (wrapped with timeout)."""
         # FIX: Add SEC rate limiting (1 request/second guideline)
         await asyncio.sleep(SEC_REQUEST_DELAY)
 

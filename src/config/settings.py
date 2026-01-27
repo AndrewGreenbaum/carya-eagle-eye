@@ -103,6 +103,33 @@ class Settings(BaseSettings):
     max_concurrent_brave_searches: int = 3  # Brave API calls in parallel
     enrichment_timeout: float = 30.0  # Timeout for enrichment API calls
 
+    # ==========================================================================
+    # RESILIENT PIPELINE SETTINGS (FIX 2026-01)
+    # ==========================================================================
+    # These settings control memory-safe batch processing and timeout behavior.
+    # The goal is to prevent OOM crashes and indefinite hangs on Railway.
+    #
+    # Key insight: The enemy of reliability is unbounded resource consumption.
+    # We bound: (1) memory via batch size, (2) time via per-request timeout,
+    # (3) failures via circuit breaker threshold.
+    # ==========================================================================
+
+    # Batch Processing: Controls memory pressure
+    # Why 50? At ~20KB per article, 50 articles = ~1MB per batch.
+    # This keeps peak memory under 10MB even with 5 concurrent extractions.
+    batch_size: int = 50
+
+    # Per-Request Timeout: Prevents single-request hangs from blocking the pipeline
+    # Why 45s? Long enough for slow but legitimate requests (large articles),
+    # short enough to fail fast when external services are degraded.
+    # Compare: Brave overall timeout was 120s, SEC was 180s - those are too coarse.
+    per_request_timeout: float = 45.0
+
+    # Circuit Breaker: Disables sources that are consistently failing
+    # Why 5? Enough to distinguish transient errors (1-2) from systemic failures (5+).
+    # Once tripped, the source is skipped for the remainder of the scan.
+    circuit_breaker_threshold: int = 5
+
     # Scheduler Settings
     # Options: "daily" (1x at 9am), "3x_daily" (9am, 1pm, 6pm), "4_hourly" (every 4 hours)
     scan_frequency: str = "daily"

@@ -149,6 +149,274 @@ async def with_timeout(coro, timeout: float, source_name: str):
         logger.error(f"SCRAPER_TIMEOUT: {source_name} timed out after {timeout}s")
         return (source_name, {"error": f"timeout after {timeout}s", "articles_found": 0})
 
+
+# =============================================================================
+# RESILIENT PIPELINE HELPERS (FIX 2026-01)
+# =============================================================================
+# These functions implement memory-safe batch processing and strict timeouts
+# to prevent OOM crashes and indefinite hangs on Railway.
+# =============================================================================
+
+
+async def fetch_with_timeout(coro, name: str = "request") -> Optional[Any]:
+    """Wrap a single request with strict per-request timeout.
+
+    Unlike with_timeout() which is for entire sources, this is for individual
+    requests (article fetches, filing fetches) within a source.
+
+    Args:
+        coro: The coroutine to execute (e.g., fetch_article, fetch_filing)
+        name: Descriptive name for logging (e.g., "brave_article:techcrunch.com/...")
+
+    Returns:
+        The coroutine result on success, or None on timeout/error.
+        Returning None allows callers to skip failed requests gracefully.
+    """
+    timeout = settings.per_request_timeout
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(f"TIMEOUT_SKIP: {name} exceeded {timeout}s - skipping")
+        return None
+    except Exception as e:
+        logger.warning(f"REQUEST_SKIP: {name} failed: {e} - skipping")
+        return None
+
+
+class SourceCircuitBreaker:
+    """Circuit breaker to disable sources that are consistently failing.
+
+    FIX 2026-01: Prevents wasting time on broken sources during a scan.
+    After threshold consecutive failures, the source is disabled for the
+    remainder of the scan. Resets at the start of each new scan.
+
+    Usage:
+        circuit_breaker = SourceCircuitBreaker()
+
+        for article in articles:
+            if circuit_breaker.is_disabled("brave_search"):
+                continue
+            try:
+                result = await fetch_article(article)
+                circuit_breaker.record_success("brave_search")
+            except Exception:
+                circuit_breaker.record_error("brave_search")
+    """
+
+    def __init__(self, threshold: Optional[int] = None):
+        """Initialize circuit breaker.
+
+        Args:
+            threshold: Number of consecutive errors before disabling source.
+                      Defaults to settings.circuit_breaker_threshold.
+        """
+        self._threshold = threshold or settings.circuit_breaker_threshold
+        self._error_counts: Dict[str, int] = {}
+        self._disabled: Set[str] = set()
+
+    def record_error(self, source: str) -> None:
+        """Record an error for a source. May trigger circuit open."""
+        self._error_counts[source] = self._error_counts.get(source, 0) + 1
+        if self._error_counts[source] >= self._threshold:
+            if source not in self._disabled:
+                self._disabled.add(source)
+                logger.warning(
+                    f"CIRCUIT_OPEN: {source} disabled after "
+                    f"{self._threshold} consecutive errors"
+                )
+
+    def record_success(self, source: str) -> None:
+        """Record a success for a source. Resets error count."""
+        self._error_counts[source] = 0
+
+    def is_disabled(self, source: str) -> bool:
+        """Check if a source is disabled."""
+        return source in self._disabled
+
+    def reset(self) -> None:
+        """Reset all circuit breaker state. Called at start of each scan."""
+        if self._disabled:
+            logger.info(
+                f"CIRCUIT_RESET: Re-enabling {len(self._disabled)} sources: "
+                f"{', '.join(self._disabled)}"
+            )
+        self._error_counts.clear()
+        self._disabled.clear()
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get current circuit breaker stats for monitoring."""
+        return {
+            "disabled_sources": list(self._disabled),
+            "error_counts": dict(self._error_counts),
+            "threshold": self._threshold,
+        }
+
+
+# Global circuit breaker instance - reset at start of each job
+_circuit_breaker = SourceCircuitBreaker()
+
+
+async def filter_articles_streaming(
+    articles: List[NormalizedArticle],
+    source_name: str,
+) -> tuple[List[NormalizedArticle], Dict[str, int]]:
+    """Filter articles through all pre-extraction filters without intermediate lists.
+
+    FIX 2026-01: Reduces memory by not creating 5 separate list copies during filtering.
+    Previous approach: 5 filtering stages each created a new list.
+    New approach: Single pass through articles, yielding only those that pass all filters.
+
+    Args:
+        articles: List of articles to filter
+        source_name: Name of source for logging and source-specific rules
+
+    Returns:
+        Tuple of (filtered_articles, stats_dict) where stats_dict contains:
+        - total: Number of input articles
+        - skipped_url: URL dedup rejects
+        - skipped_source: Source-specific filter rejects
+        - skipped_title: Title filter rejects
+        - skipped_content: Content hash dedup rejects
+        - passed: Number that passed all filters
+    """
+    stats = {
+        "total": len(articles),
+        "skipped_url": 0,
+        "skipped_source": 0,
+        "skipped_title": 0,
+        "skipped_content": 0,
+        "passed": 0,
+    }
+
+    if not articles:
+        return [], stats
+
+    # Pass 1: Filter by URL dedup, source rules, and title
+    # These are fast in-memory checks
+    url_and_title_passed = []
+    for article in articles:
+        # URL dedup check
+        if await check_global_url_seen(article.url):
+            stats["skipped_url"] += 1
+            continue
+
+        # Source-specific filter
+        should_skip, reason = should_skip_by_source(source_name, article.url, article.title)
+        if should_skip:
+            stats["skipped_source"] += 1
+            logger.debug(f"[{source_name}] Skipping by source rule: {reason}")
+            continue
+
+        # Title filter (skip non-announcements)
+        if is_non_announcement_title(article.title):
+            stats["skipped_title"] += 1
+            continue
+
+        # Title filter (require funding signals)
+        if not is_likely_funding_from_title(article.title):
+            stats["skipped_title"] += 1
+            continue
+
+        url_and_title_passed.append(article)
+
+    # Pass 2: Content hash dedup (requires DB query, so batch it)
+    if url_and_title_passed:
+        filtered_articles, content_skipped = await batch_check_content_seen(url_and_title_passed)
+        stats["skipped_content"] = content_skipped
+        stats["passed"] = len(filtered_articles)
+    else:
+        filtered_articles = []
+
+    if stats["total"] > 0:
+        logger.info(
+            f"[{source_name}] Filter stats: total={stats['total']}, "
+            f"url_dedup={stats['skipped_url']}, source={stats['skipped_source']}, "
+            f"title={stats['skipped_title']}, content={stats['skipped_content']}, "
+            f"passed={stats['passed']}"
+        )
+
+    return filtered_articles, stats
+
+
+async def process_articles_batched(
+    articles: List[NormalizedArticle],
+    source_name: str,
+    scan_job_id: Optional[int],
+    process_fn,
+) -> Dict[str, int]:
+    """Process articles in memory-safe batches.
+
+    FIX 2026-01: Processes articles in chunks of BATCH_SIZE (default 50) to prevent
+    memory accumulation. After each batch, results are aggregated and batch data is
+    explicitly released.
+
+    Args:
+        articles: List of articles to process
+        source_name: Name of source for logging
+        scan_job_id: Optional scan job ID for linking deals
+        process_fn: Async function to process a single article.
+                   Should return extraction result or raise exception.
+
+    Returns:
+        Dict with processing stats (deals_saved, errors, etc.)
+    """
+    batch_size = settings.batch_size
+    max_concurrent = settings.max_concurrent_extractions
+
+    stats = {
+        "articles_processed": 0,
+        "deals_saved": 0,
+        "errors": 0,
+        "batches_completed": 0,
+    }
+
+    if not articles:
+        return stats
+
+    total_batches = (len(articles) + batch_size - 1) // batch_size
+
+    for batch_num, i in enumerate(range(0, len(articles), batch_size), 1):
+        batch = articles[i:i + batch_size]
+
+        # Process batch with limited concurrency
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def process_one(article):
+            async with semaphore:
+                return await process_fn(article)
+
+        # Execute batch
+        batch_results = await asyncio.gather(
+            *[process_one(a) for a in batch],
+            return_exceptions=True
+        )
+
+        # Aggregate results
+        batch_deals = 0
+        batch_errors = 0
+        for result in batch_results:
+            if isinstance(result, Exception):
+                batch_errors += 1
+                logger.debug(f"[{source_name}] Batch {batch_num} exception: {result}")
+            elif result:  # Truthy result means deal saved
+                batch_deals += 1
+
+        stats["articles_processed"] += len(batch)
+        stats["deals_saved"] += batch_deals
+        stats["errors"] += batch_errors
+        stats["batches_completed"] += 1
+
+        logger.info(
+            f"[{source_name}] Batch {batch_num}/{total_batches}: "
+            f"processed={len(batch)}, deals={batch_deals}, errors={batch_errors}"
+        )
+
+        # Explicitly release batch memory
+        del batch
+        del batch_results
+
+    return stats
+
 # Tracking parameters to strip from URLs for normalization
 TRACKING_PARAMS = {
     'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
@@ -231,12 +499,15 @@ async def clear_job_tracker() -> None:
 
     FIX 2026-01: Single function to clear all job state instead of
     separate clear_global_seen_urls() and clear_global_content_hashes().
-    Also cleans up expired entries from persistent cache.
+    Also cleans up expired entries from persistent cache and resets circuit breaker.
     """
-    global _job_tracker
+    global _job_tracker, _circuit_breaker
 
     # Clear the in-memory tracker
     await _job_tracker.clear()
+
+    # Reset circuit breaker for fresh run (re-enables any disabled sources)
+    _circuit_breaker.reset()
 
     # Clean up expired entries from persistent cache
     try:
@@ -1638,11 +1909,12 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
 
     # =========================================================================
     # PART 1: API-RATE-LIMITED SOURCES (run serially to respect rate limits)
+    # FIX 2026-01: Added circuit breaker checks to skip sources with repeated failures
     # =========================================================================
 
     # 1. BRAVE SEARCH (most important - includes partner name queries)
-    # FIX 2026-01: Added 120s timeout (Brave makes many API calls)
-    if settings.brave_search_key:
+    # FIX 2026-01: Added 120s timeout (Brave makes many API calls) + circuit breaker
+    if settings.brave_search_key and not _circuit_breaker.is_disabled("brave_search"):
         try:
             from ..harvester.scrapers.brave_search import BraveSearchScraper
 
@@ -1663,89 +1935,100 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             stats = await process_external_articles(articles, "brave_search", scan_job_id, skip_title_filter=True)
             results["brave_search"] = stats
             total_deals_saved += stats["deals_saved"]
+            _circuit_breaker.record_success("brave_search")
 
         except asyncio.TimeoutError:
             logger.error("SCRAPER_TIMEOUT: brave_search timed out after 120s")
             results["brave_search"] = {"error": "timeout after 120s", "articles_found": 0}
+            _circuit_breaker.record_error("brave_search")
         except Exception as e:
             logger.error("Brave Search scraping failed: %s", e)
             results["brave_search"] = {"error": str(e)}
+            _circuit_breaker.record_error("brave_search")
+    elif _circuit_breaker.is_disabled("brave_search"):
+        results["brave_search"] = {"error": "circuit breaker open", "articles_found": 0}
 
     # 2. SEC EDGAR (free - Form D filings, rate limited)
-    # FIX 2026-01: Added 180s timeout (SEC has many filings + rate limiting)
-    try:
-        from ..harvester.scrapers.sec_edgar import SECEdgarScraper
+    # FIX 2026-01: Added 180s timeout (SEC has many filings + rate limiting) + circuit breaker
+    if not _circuit_breaker.is_disabled("sec_edgar"):
+        try:
+            from ..harvester.scrapers.sec_edgar import SECEdgarScraper
 
-        async def _scrape_sec():
-            async with SECEdgarScraper() as scraper:
-                filings = await scraper.fetch_recent_filings(hours=days * 24)
-                logger.info(f"SEC EDGAR: Processing {len(filings)} filings")
+            async def _scrape_sec():
+                async with SECEdgarScraper() as scraper:
+                    filings = await scraper.fetch_recent_filings(hours=days * 24)
+                    logger.info(f"SEC EDGAR: Processing {len(filings)} filings")
 
-                # FIX: Parallel SEC fetching with semaphore (was serial 1s per filing = 100s for 100 filings)
-                # SEC allows ~3 concurrent requests safely
-                # Now: 3 concurrent = ~35s for 100 filings (65% faster)
-                MAX_SEC_CONCURRENT = 3
-                sec_semaphore = asyncio.Semaphore(MAX_SEC_CONCURRENT)
+                    # FIX: Parallel SEC fetching with semaphore (was serial 1s per filing = 100s for 100 filings)
+                    # SEC allows ~3 concurrent requests safely
+                    # Now: 3 concurrent = ~35s for 100 filings (65% faster)
+                    MAX_SEC_CONCURRENT = 3
+                    sec_semaphore = asyncio.Semaphore(MAX_SEC_CONCURRENT)
 
-                # FIX 2026-01: Token bucket rate limiting - only sleep when needed
-                # Previous bug: sleep(1.0) inside semaphore serialized ALL requests
-                # Now: track last request time, only sleep if < 0.35s since last request
-                # With 3 concurrent + 0.35s min interval = ~8.5 requests/sec (SEC allows 10/sec)
-                _sec_last_request = [0.0]  # Use list for mutation in nested function
-                _sec_rate_lock = asyncio.Lock()
-                SEC_MIN_INTERVAL = 0.35  # Minimum seconds between requests
+                    # FIX 2026-01: Token bucket rate limiting - only sleep when needed
+                    # Previous bug: sleep(1.0) inside semaphore serialized ALL requests
+                    # Now: track last request time, only sleep if < 0.35s since last request
+                    # With 3 concurrent + 0.35s min interval = ~8.5 requests/sec (SEC allows 10/sec)
+                    _sec_last_request = [0.0]  # Use list for mutation in nested function
+                    _sec_rate_lock = asyncio.Lock()
+                    SEC_MIN_INTERVAL = 0.35  # Minimum seconds between requests
 
-                async def fetch_filing_with_limit(filing):
-                    """Fetch filing details with token-bucket rate limiting."""
-                    async with sec_semaphore:
-                        # FIX 2026-01: Token bucket rate limiting - release lock BEFORE network call
-                        # Previous bug: lock was held during fetch_filing_details(), serializing
-                        # all requests (reduced effective concurrency from 3 to 1)
-                        async with _sec_rate_lock:
-                            now = time.monotonic()
-                            elapsed = now - _sec_last_request[0]
-                            if elapsed < SEC_MIN_INTERVAL:
-                                await asyncio.sleep(SEC_MIN_INTERVAL - elapsed)
-                            # Update timestamp AFTER sleep, right before releasing lock
-                            _sec_last_request[0] = time.monotonic()
-                        # Lock released HERE - network call happens outside lock
-                        result = await scraper.fetch_filing_details(filing)
-                        if result is None:
-                            return None
-                        matched_fund = scraper.match_tracked_fund(result)
-                        article = await scraper.to_normalized_article(result, matched_fund)
-                        return article
+                    async def fetch_filing_with_limit(filing):
+                        """Fetch filing details with token-bucket rate limiting."""
+                        async with sec_semaphore:
+                            # FIX 2026-01: Token bucket rate limiting - release lock BEFORE network call
+                            # Previous bug: lock was held during fetch_filing_details(), serializing
+                            # all requests (reduced effective concurrency from 3 to 1)
+                            async with _sec_rate_lock:
+                                now = time.monotonic()
+                                elapsed = now - _sec_last_request[0]
+                                if elapsed < SEC_MIN_INTERVAL:
+                                    await asyncio.sleep(SEC_MIN_INTERVAL - elapsed)
+                                # Update timestamp AFTER sleep, right before releasing lock
+                                _sec_last_request[0] = time.monotonic()
+                            # Lock released HERE - network call happens outside lock
+                            result = await scraper.fetch_filing_details(filing)
+                            if result is None:
+                                return None
+                            matched_fund = scraper.match_tracked_fund(result)
+                            article = await scraper.to_normalized_article(result, matched_fund)
+                            return article
 
-                # Fetch all filings concurrently (limited by semaphore)
-                results_list = await asyncio.gather(
-                    *[fetch_filing_with_limit(f) for f in filings],
-                    return_exceptions=True
-                )
+                    # Fetch all filings concurrently (limited by semaphore)
+                    results_list = await asyncio.gather(
+                        *[fetch_filing_with_limit(f) for f in filings],
+                        return_exceptions=True
+                    )
 
-                # Filter out None results and exceptions
-                articles = []
-                for result in results_list:
-                    if result is not None and not isinstance(result, Exception):
-                        articles.append(result)
-                    elif isinstance(result, Exception):
-                        logger.warning(f"SEC filing fetch error: {result}")
+                    # Filter out None results and exceptions
+                    articles = []
+                    for result in results_list:
+                        if result is not None and not isinstance(result, Exception):
+                            articles.append(result)
+                        elif isinstance(result, Exception):
+                            logger.warning(f"SEC filing fetch error: {result}")
 
-                logger.info(f"SEC EDGAR: Created {len(articles)} articles with full details")
-                return articles
+                    logger.info(f"SEC EDGAR: Created {len(articles)} articles with full details")
+                    return articles
 
-        articles = await asyncio.wait_for(_scrape_sec(), timeout=180.0)
+            articles = await asyncio.wait_for(_scrape_sec(), timeout=180.0)
 
-        # SEC filings are already funding-related, bypass title filter
-        stats = await process_external_articles(articles, "sec_edgar", scan_job_id, skip_title_filter=True)
-        results["sec_edgar"] = stats
-        total_deals_saved += stats["deals_saved"]
+            # SEC filings are already funding-related, bypass title filter
+            stats = await process_external_articles(articles, "sec_edgar", scan_job_id, skip_title_filter=True)
+            results["sec_edgar"] = stats
+            total_deals_saved += stats["deals_saved"]
+            _circuit_breaker.record_success("sec_edgar")
 
-    except asyncio.TimeoutError:
-        logger.error("SCRAPER_TIMEOUT: sec_edgar timed out after 180s")
-        results["sec_edgar"] = {"error": "timeout after 180s", "articles_found": 0}
-    except Exception as e:
-        logger.error("SEC EDGAR scraping failed: %s", e)
-        results["sec_edgar"] = {"error": str(e)}
+        except asyncio.TimeoutError:
+            logger.error("SCRAPER_TIMEOUT: sec_edgar timed out after 180s")
+            results["sec_edgar"] = {"error": "timeout after 180s", "articles_found": 0}
+            _circuit_breaker.record_error("sec_edgar")
+        except Exception as e:
+            logger.error("SEC EDGAR scraping failed: %s", e)
+            results["sec_edgar"] = {"error": str(e)}
+            _circuit_breaker.record_error("sec_edgar")
+    else:
+        results["sec_edgar"] = {"error": "circuit breaker open", "articles_found": 0}
 
     # 3. TWITTER (API rate limited)
     # FIX 2026-01: Added 60s timeout
