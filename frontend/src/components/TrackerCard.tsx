@@ -55,7 +55,7 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
           {item.companyName}
         </h4>
         {displayAmount && (
-          <span className="text-[15px] font-medium tabular-nums shrink-0 text-zinc-400">
+          <span className="text-[15px] font-medium tabular-nums shrink-0 text-emerald-400">
             {displayAmount}
           </span>
         )}
