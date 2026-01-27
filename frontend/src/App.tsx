@@ -562,9 +562,11 @@ function App() {
 
           {/* Scans View */}
           {currentView === 'scans' && (
-            <ErrorBoundary>
-              <ScansPage onBack={() => setCurrentView('dashboard')} />
-            </ErrorBoundary>
+            <div className="flex-1 overflow-auto">
+              <ErrorBoundary>
+                <ScansPage onBack={() => setCurrentView('dashboard')} />
+              </ErrorBoundary>
+            </div>
           )}
 
           {/* Pre-Funding Signals View */}
