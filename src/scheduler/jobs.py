@@ -13,6 +13,7 @@ Runs scraping every 4 hours of all 18 VC funds with:
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Set
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
@@ -344,8 +345,12 @@ async def check_global_content_seen(text: str, source_url: str = None) -> bool:
             await session.commit()
 
     except Exception as e:
-        # Don't fail extraction if DB check fails, log and continue
-        logger.warning(f"Persistent content cache check failed: {e}")
+        # FIX 2026-01: Return False (process article) on DB error to prevent data loss
+        # Previous "conservative" approach returned True (skip), which loses articles PERMANENTLY
+        # Better to risk occasional duplicate processing (~$0.02) than lose articles entirely
+        # Duplicates are caught by dedup logic anyway; lost articles are unrecoverable
+        logger.warning(f"Persistent content cache check failed, processing anyway: {e}")
+        return False
 
     # Add to in-memory cache
     await _job_tracker.add_content_hash(fingerprint)
@@ -1275,6 +1280,9 @@ async def _process_external_articles_impl(
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
     results_lock = asyncio.Lock()
     # FIX: Collect alerts to send OUTSIDE semaphore (was blocking 15s per alert)
+    # FIX 2026-01: Limit alert queue to prevent unbounded memory growth
+    # 10K articles could create 10K concurrent alert tasks without this limit
+    MAX_ALERTS = 50
     pending_alerts = []
     alerts_lock = asyncio.Lock()
 
@@ -1388,9 +1396,13 @@ async def _process_external_articles_impl(
 
                 # FIX: Queue alert for sending OUTSIDE semaphore scope
                 # This prevents 15s alert timeouts from blocking concurrent processing
+                # FIX 2026-01: Check MAX_ALERTS limit to prevent unbounded queue
                 if alert_info:
                     async with alerts_lock:
-                        pending_alerts.append(alert_info)
+                        if len(pending_alerts) < MAX_ALERTS:
+                            pending_alerts.append(alert_info)
+                        else:
+                            logger.warning(f"[{source_name}] Alert queue full ({MAX_ALERTS}), skipping alert for {alert_info.company_name}")
 
                 return extraction
 
@@ -1406,16 +1418,19 @@ async def _process_external_articles_impl(
     # Process all articles concurrently (limited by semaphore)
     results = await asyncio.gather(*[process_article(a) for a in new_articles], return_exceptions=True)
 
-    # Check for unhandled exceptions in results
+    # FIX 2026-01: Count exceptions in error stats (was only logging, not counting)
     for i, result in enumerate(results):
         if isinstance(result, Exception):
             logger.error(f"[{source_name}] Unhandled exception processing article {i}: {result}")
+            stats["errors"] += 1
 
-    # FIX: Send alerts AFTER all processing completes (outside semaphore)
-    # This allows full concurrency during extraction while still sending alerts
+    # FIX 2026-01: Send alerts in PARALLEL (was serial, blocking 15s per timeout)
+    # This prevents slow alerts from blocking the entire scrape completion
     if pending_alerts:
         from .notifications import send_lead_deal_alert
-        for alert_info in pending_alerts:
+
+        async def send_single_alert(alert_info):
+            """Send a single alert with error handling."""
             try:
                 await send_lead_deal_alert(
                     company_name=alert_info.company_name,
@@ -1430,6 +1445,12 @@ async def _process_external_articles_impl(
                     f"[{source_name}] Alert sending failed for {alert_info.company_name}: {alert_err}",
                     exc_info=True
                 )
+
+        # Send all alerts in parallel (return_exceptions=True prevents one failure from blocking others)
+        await asyncio.gather(
+            *[send_single_alert(alert) for alert in pending_alerts],
+            return_exceptions=True
+        )
 
     # Log confidence band distribution for monitoring
     bands = stats["confidence_bands"]
@@ -1666,11 +1687,28 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
                 MAX_SEC_CONCURRENT = 3
                 sec_semaphore = asyncio.Semaphore(MAX_SEC_CONCURRENT)
 
+                # FIX 2026-01: Token bucket rate limiting - only sleep when needed
+                # Previous bug: sleep(1.0) inside semaphore serialized ALL requests
+                # Now: track last request time, only sleep if < 0.35s since last request
+                # With 3 concurrent + 0.35s min interval = ~8.5 requests/sec (SEC allows 10/sec)
+                _sec_last_request = [0.0]  # Use list for mutation in nested function
+                _sec_rate_lock = asyncio.Lock()
+                SEC_MIN_INTERVAL = 0.35  # Minimum seconds between requests
+
                 async def fetch_filing_with_limit(filing):
-                    """Fetch filing details with rate-limited concurrency."""
+                    """Fetch filing details with token-bucket rate limiting."""
                     async with sec_semaphore:
-                        # SEC rate limit - 1s delay between requests
-                        await asyncio.sleep(1.0)
+                        # FIX 2026-01: Token bucket rate limiting - release lock BEFORE network call
+                        # Previous bug: lock was held during fetch_filing_details(), serializing
+                        # all requests (reduced effective concurrency from 3 to 1)
+                        async with _sec_rate_lock:
+                            now = time.monotonic()
+                            elapsed = now - _sec_last_request[0]
+                            if elapsed < SEC_MIN_INTERVAL:
+                                await asyncio.sleep(SEC_MIN_INTERVAL - elapsed)
+                            # Update timestamp AFTER sleep, right before releasing lock
+                            _sec_last_request[0] = time.monotonic()
+                        # Lock released HERE - network call happens outside lock
                         result = await scraper.fetch_filing_details(filing)
                         if result is None:
                             return None

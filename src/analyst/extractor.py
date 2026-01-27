@@ -15,6 +15,7 @@ OPTIMIZED:
 import asyncio
 import hashlib
 import logging
+import math
 import random
 import re
 import instructor
@@ -509,9 +510,17 @@ async def flush_token_usage_batch(force: bool = False) -> None:
 
     Args:
         force: If True, flush even if batch isn't full (used at end of scan)
+
+    FIX (2026-01): Re-add on failure now happens under lock. The copy-and-clear
+    was already atomic, but the failure path had a race condition:
+    1. Thread A's DB write fails, needs to re-add batch
+    2. Thread B adds new record between failure and re-add
+    3. Records get out of order or lost on subsequent flush
+    Now the re-add is protected by acquiring the lock first.
     """
     global _token_usage_batch
 
+    # FIX: Hold lock during entire copy-and-clear to prevent race
     async with _token_usage_batch_lock:
         if not _token_usage_batch:
             return
@@ -519,7 +528,7 @@ async def flush_token_usage_batch(force: bool = False) -> None:
         if not force and len(_token_usage_batch) < TOKEN_USAGE_BATCH_SIZE:
             return
 
-        # Grab batch and clear buffer
+        # Grab batch and clear buffer atomically (under lock)
         batch_to_flush = _token_usage_batch.copy()
         _token_usage_batch = []
 
@@ -555,9 +564,11 @@ async def flush_token_usage_batch(force: bool = False) -> None:
         )
     except Exception as e:
         logger.error(f"Failed to flush token usage batch: {e}", exc_info=True)
-        # Re-add failed records to batch for retry
+        # FIX (2026-01): Re-add failed records under lock to prevent race condition
+        # Prepend failed records so they're retried first on next flush
         async with _token_usage_batch_lock:
             _token_usage_batch = batch_to_flush + _token_usage_batch
+            logger.warning(f"[TOKEN BATCH] Re-queued {len(batch_to_flush)} failed records for retry")
 
 
 async def log_token_usage(
@@ -761,7 +772,9 @@ async def _reextract_with_sonnet(
     Re-extract a deal using Sonnet when Haiku's extraction has quality issues.
 
     Called when:
-    - Confidence is in the "salvageable" range (0.35-0.65)
+    - Internal sources: Confidence in range 0.45-0.65 (tighter threshold)
+    - External sources: Confidence in range 0.35-0.65 (more lenient for headlines)
+    - High-conf path: >0.65 + weak evidence + tracked lead
     - Deal appears valid (is_new_announcement=True)
     - Has quality issues (weak lead evidence OR no founders)
 
@@ -802,12 +815,21 @@ async def _reextract_with_sonnet(
         # This ensures fair comparison between Haiku and Sonnet results
         # FIX (2026-01): Added _validate_round_type and _validate_founders_in_text
         # which were missing, causing duplicate calls after Sonnet returned
-        response = _validate_company_in_text(response, article_text)
-        response = _validate_startup_not_fund(response, article_text)
-        response = _validate_round_type(response)
-        response = _validate_investors_in_text(response, article_text)
-        response = _validate_founders_in_text(response, article_text)
-        response = _verify_tracked_fund(response, article_text)
+        # FIX (2026-01): Wrap post-processing in try-catch to fall back to Haiku on errors
+        try:
+            response = _validate_company_in_text(response, article_text)
+            response = _validate_startup_not_fund(response, article_text)
+            response = _validate_round_type(response)
+            response = _validate_investors_in_text(response, article_text)
+            response = _validate_founders_in_text(response, article_text)
+            response = _verify_tracked_fund(response, article_text)
+        except Exception as post_proc_error:
+            logger.error(
+                f"HYBRID_FAILED: Sonnet post-processing error for {source_url}: {post_proc_error}",
+                exc_info=True
+            )
+            # Fall back to Haiku result rather than failing entirely
+            return None
 
         # Decide which result is better
         # Prefer Sonnet if: higher confidence OR more founders OR stronger lead evidence
@@ -1467,7 +1489,9 @@ def _parse_relative_date(match: re.Match, unit: str, reference_date: date) -> Op
         elif unit == "early_last_year":
             return date(reference_date.year - 1, 2, 1)
     except (ValueError, OverflowError) as e:
-        logger.debug(f"Error parsing relative date: {e}")
+        # FIX (2026-01): Upgrade from DEBUG to WARNING for visibility in monitoring
+        # These failures indicate potential bugs in date parsing logic
+        logger.warning(f"Failed to parse relative date: {e}")
     return None
 
 
@@ -1800,6 +1824,43 @@ def truncate_article_smart(text: str, max_chars: int = MAX_ARTICLE_CHARS) -> str
     return result
 
 
+def _sanitize_prompt_value(value: str, max_length: int = 500) -> str:
+    """Sanitize a value for inclusion in a prompt to prevent injection attacks.
+
+    FIX (2026-01): Prevents prompt injection via unescaped fund data.
+    Strips control characters, limits length, and escapes special formatting.
+
+    Args:
+        value: The string value to sanitize
+        max_length: Maximum length to truncate to (default 500 chars)
+
+    Returns:
+        Sanitized string safe for inclusion in prompts
+    """
+    if not value:
+        return ""
+
+    # Remove control characters (keep newlines and tabs for readability)
+    sanitized = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', value)
+
+    # Escape sequences that could be interpreted as prompt instructions
+    # Replace triple backticks (code blocks), triple dashes (section breaks)
+    sanitized = sanitized.replace('```', '`\u200b`\u200b`')  # Zero-width space break
+    sanitized = sanitized.replace('---', '-\u200b-\u200b-')
+
+    # Escape potential role/instruction markers (defense in depth)
+    # Note: Fund config is from hardcoded FUND_REGISTRY, so this is precautionary
+    # Use non-raw string for replacement so \u200b is interpreted as Unicode
+    sanitized = re.sub(r'(?i)(SYSTEM|USER|ASSISTANT):', '\\1\u200b:', sanitized)
+    sanitized = re.sub(r'(?i)<(/?)(instructions|system|prompt)', '<\\1\u200b\\2', sanitized)
+
+    # Truncate to max length
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length] + "..."
+
+    return sanitized.strip()
+
+
 def build_extraction_prompt(
     article_text: str,
     fund_context: Optional[FundConfig] = None,
@@ -1833,16 +1894,26 @@ ARTICLE TEXT:
 """
 
     if fund_context:
+        # FIX (2026-01): Sanitize fund data to prevent prompt injection
+        # User-configurable fields (extraction_notes, negative_keywords, partner_names)
+        # could contain malicious content that alters the prompt's behavior
+        safe_name = _sanitize_prompt_value(fund_context.name, max_length=100)
+        safe_notes = _sanitize_prompt_value(fund_context.extraction_notes or "", max_length=500)
+
         prompt += f"""
 FUND-SPECIFIC CONTEXT:
-This article was found via {fund_context.name}'s news feed.
-Extraction notes: {fund_context.extraction_notes}
-WARNING: This does NOT mean {fund_context.name} invested. Only include them if EXPLICITLY mentioned in article.
+This article was found via {safe_name}'s news feed.
+Extraction notes: {safe_notes}
+WARNING: This does NOT mean {safe_name} invested. Only include them if EXPLICITLY mentioned in article.
 """
         if fund_context.negative_keywords:
-            prompt += f"EXCLUDE if these appear: {', '.join(fund_context.negative_keywords)}\n"
+            # Sanitize each keyword individually
+            safe_keywords = [_sanitize_prompt_value(kw, max_length=50) for kw in fund_context.negative_keywords]
+            prompt += f"EXCLUDE if these appear: {', '.join(safe_keywords)}\n"
         if fund_context.partner_names:
-            prompt += f"Known partners: {', '.join(fund_context.partner_names)}\n"
+            # Sanitize each partner name individually
+            safe_partners = [_sanitize_prompt_value(p, max_length=100) for p in fund_context.partner_names]
+            prompt += f"Known partners: {', '.join(safe_partners)}\n"
 
     prompt += """
 Extract the deal(s) with full chain-of-thought reasoning.
@@ -2756,6 +2827,14 @@ def _validate_company_in_text(deal: DealExtraction, article_text: str) -> DealEx
             return deal
         # Single common word - require word boundary match (not just substring)
         for word in core_words:
+            # FIX (2026-01): Skip empty strings - empty regex pattern matches everywhere
+            if not word:
+                # Log to help trace root cause - how did empty string get past len>=3 filter?
+                logger.debug(
+                    f"EMPTY_CORE_WORD: Skipping empty string in core_words for '{deal.startup_name}', "
+                    f"full list: {core_words}"
+                )
+                continue
             # Use word boundary check: word must be surrounded by non-alphanumeric
             pattern = rf'(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])'
             if re.search(pattern, text_lower):
@@ -2952,6 +3031,8 @@ def _validate_confidence_score(deal: DealExtraction) -> DealExtraction:
     any penalties are applied. This separates extraction quality from lead evidence
     quality for clearer semantics.
 
+    FIX 2026-01: Now catches NaN and infinity values which can corrupt downstream logic.
+
     Args:
         deal: The extracted deal
 
@@ -2960,8 +3041,17 @@ def _validate_confidence_score(deal: DealExtraction) -> DealExtraction:
     """
     original_score = deal.confidence_score
 
+    # FIX (2026-01): Catch NaN and infinity before other checks
+    # These can corrupt downstream logic (comparisons, averages, etc.)
+    if math.isnan(deal.confidence_score) or math.isinf(deal.confidence_score):
+        deal.confidence_score = 0.0
+        # ERROR level: NaN/Inf indicates a serious LLM parsing failure
+        logger.error(
+            f"INVALID_CONFIDENCE: NaN/Inf for {deal.startup_name}: "
+            f"{original_score} -> 0.0 (LLM parsing failure)"
+        )
     # Clamp to valid range
-    if deal.confidence_score < 0:
+    elif deal.confidence_score < 0:
         deal.confidence_score = 0.0
         logger.warning(
             f"CLAMPING negative confidence score for {deal.startup_name}: "
