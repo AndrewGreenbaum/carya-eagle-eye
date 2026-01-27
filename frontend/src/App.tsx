@@ -11,11 +11,10 @@
  * Command Center dark theme
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { CommandHeader } from './components/CommandHeader';
+import { useState, useEffect, useCallback } from 'react';
+import { ChevronLeft, ChevronRight, Menu } from 'lucide-react';
 import { CommandSidebar } from './components/CommandSidebar';
-import { StatsCards } from './components/StatsCards';
+// StatsCards removed - header integrated into DealsTable
 import { DealsTable } from './components/DealsTable';
 import { DealModal } from './components/DealModal';
 import { FeedbackModal } from './components/FeedbackModal';
@@ -24,6 +23,7 @@ import { ScraperControl } from './components/ScraperControl';
 import { SettingsPanel } from './components/SettingsPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Tracker } from './components/Tracker';
+import { NewDeals } from './components/NewDeals';
 import { AdminFeedback } from './components/AdminFeedback';
 import { TokenUsage } from './components/TokenUsage';
 import { MindMapDocs } from './components/MindMapDocs';
@@ -39,8 +39,6 @@ import {
   fetchTokenUsage,
   invalidateCache,
   getExportUrl,
-  ApiTimeoutError,
-  addDealToTracker,
 } from './api/deals';
 import type {
   Deal,
@@ -127,7 +125,7 @@ function App() {
   // View state - persist to URL hash for refresh
   const getInitialView = (): ViewType => {
     const hash = window.location.hash.slice(1);
-    const validViews: ViewType[] = ['dashboard', 'tracker', 'prefunding', 'stealth', 'scrapers', 'scans', 'settings'];
+    const validViews: ViewType[] = ['dashboard', 'new', 'tracker', 'prefunding', 'stealth', 'scrapers', 'scans', 'settings'];
     return validViews.includes(hash as ViewType) ? (hash as ViewType) : 'dashboard';
   };
   const [currentView, setCurrentView] = useState<ViewType>(getInitialView);
@@ -173,7 +171,7 @@ function App() {
     nextScrape: new Date(Date.now() + 3600000).toISOString(),
   });
 
-  // Stats
+  // Stats (used internally for calculations)
   const [stats, setStats] = useState<DashboardStats>({
     newDeals24h: 0,
     newDealsTrend: 0,
@@ -182,33 +180,60 @@ function App() {
     claudeCalls: 0,
     verificationRate: 100,
   });
+  void stats;
 
   // Modal state
   const [selectedDeal, setSelectedDeal] = useState<Deal | null>(null);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [aircraftTrackerOpen, setAircraftTrackerOpen] = useState(false);
 
-
-  // Keyboard navigation state
-  const [selectedDealIdx, setSelectedDealIdx] = useState<number>(-1);
-  const [copiedDeal, setCopiedDeal] = useState<Deal | null>(null);
-  const [pasteToast, setPasteToast] = useState<string | null>(null);
-
-  // Ref to save scroll position when modal opens
-  const savedScrollPos = useRef<number>(0);
-
   // Debounce search query
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedSearch(filters.searchQuery);
-    }, 300);
+    }, 150);
     return () => clearTimeout(timer);
   }, [filters.searchQuery]);
+
+  // Intercept settings view → open panel overlay instead
+  useEffect(() => {
+    if (currentView === 'settings') {
+      setSettingsOpen(true);
+      setCurrentView('dashboard');
+    }
+  }, [currentView]);
 
   // Sync view to URL hash for refresh persistence
   useEffect(() => {
     window.location.hash = currentView;
   }, [currentView]);
+
+  // Global keyboard shortcuts for view switching (1=Dashboard, 2=Tracker)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Skip if typing in an input/textarea
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      // Skip if a modal is open
+      if (document.querySelector('[aria-modal="true"]')) return;
+      // Skip if modifier keys are held (allow Cmd+1 for browser tabs)
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      if (e.key === '/') {
+        e.preventDefault();
+        const searchInput = document.querySelector('input[placeholder="Search"]') as HTMLInputElement;
+        if (searchInput) searchInput.focus();
+      } else if (e.key === '1') {
+        setCurrentView('dashboard');
+      } else if (e.key === '2') {
+        setCurrentView('tracker');
+      } else if (e.key === '3') {
+        setCurrentView('new');
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Load system status
   const loadSystemStatus = useCallback(async () => {
@@ -248,8 +273,8 @@ function App() {
 
   // Load deals
   const loadDeals = useCallback(
-    async (offset = 0) => {
-      setLoading(true);
+    async (offset = 0, append = false) => {
+      if (!append) setLoading(true);
       try {
         // When showRejected is true, don't apply filters - show everything
         // Option C Filter logic (nested):
@@ -271,14 +296,13 @@ function App() {
         });
 
         // Use API results directly - no client-side filtering needed
-        // The API already filters based on the parameters we sent
-        setPagination({
-          deals: result.deals,
+        setPagination((prev) => ({
+          deals: append ? [...prev.deals, ...result.deals] : result.deals,
           total: result.total,
           limit: PAGE_SIZE,
           offset: result.offset,
           hasMore: result.hasMore,
-        });
+        }));
 
         // Calculate stats from the results
         // Use total count as "companies scanned" - this is the total in the database
@@ -323,20 +347,15 @@ function App() {
 
         setError(null);
       } catch (err) {
-        console.error('Failed to fetch deals:', err);
-
-        if (err instanceof ApiTimeoutError) {
-          setError('Request timed out. Server may be busy with scans. Click Retry to refresh.');
-        } else {
-          setPagination({
-            deals: sampleDeals,
-            total: sampleDeals.length,
-            limit: PAGE_SIZE,
-            offset: 0,
-            hasMore: false,
-          });
-          setError('Failed to load deals. Using sample data.');
-        }
+        console.warn('API unavailable, using sample data:', err);
+        setPagination({
+          deals: sampleDeals,
+          total: sampleDeals.length,
+          limit: PAGE_SIZE,
+          offset: 0,
+          hasMore: false,
+        });
+        setError('Using sample data (API unavailable)');
       } finally {
         setLoading(false);
       }
@@ -361,107 +380,12 @@ function App() {
     return () => clearInterval(interval);
   }, [loadSystemStatus]);
 
-  // Global keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      // Skip if user is typing in an input or textarea
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      // Skip if any modal is open (except for modal-specific shortcuts)
-      if (selectedDeal || feedbackOpen || aircraftTrackerOpen || settingsOpen) return;
-
-      // View switching (no modifiers)
-      if (!e.metaKey && !e.ctrlKey && !e.altKey) {
-        if (e.key === '1') {
-          e.preventDefault();
-          setCurrentView('dashboard');
-          return;
-        } else if (e.key === '2') {
-          e.preventDefault();
-          setCurrentView('tracker');
-          return;
-        }
-      }
-
-      // Dashboard navigation (only when on dashboard)
-      if (currentView === 'dashboard') {
-        if (e.key === 'j' || e.key === 'ArrowDown') {
-          e.preventDefault();
-          setSelectedDealIdx((prev) => {
-            const maxIdx = pagination.deals.length - 1;
-            const newIdx = prev < 0 ? 0 : Math.min(prev + 1, maxIdx);
-            // Scroll the new row into view (center it to avoid header overlap)
-            requestAnimationFrame(() => {
-              const rows = document.querySelectorAll('tr.deal-row');
-              if (rows[newIdx]) {
-                rows[newIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
-              }
-            });
-            return newIdx;
-          });
-        } else if (e.key === 'k' || e.key === 'ArrowUp') {
-          e.preventDefault();
-          setSelectedDealIdx((prev) => {
-            const newIdx = Math.max(prev - 1, 0);
-            // Scroll the new row into view (center it to avoid header overlap)
-            requestAnimationFrame(() => {
-              const rows = document.querySelectorAll('tr.deal-row');
-              if (rows[newIdx]) {
-                rows[newIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
-              }
-            });
-            return newIdx;
-          });
-        } else if (e.key === 'Enter' && selectedDealIdx >= 0) {
-          e.preventDefault();
-          const deal = pagination.deals[selectedDealIdx];
-          if (deal) setSelectedDeal(deal);
-        } else if (e.key === 'Escape') {
-          e.preventDefault();
-          setSelectedDealIdx(-1);
-        }
-      }
-
-      // Ctrl+V to paste copied deal to tracker
-      if ((e.ctrlKey || e.metaKey) && e.key === 'v' && copiedDeal) {
-        e.preventDefault();
-        addDealToTracker(parseInt(copiedDeal.id), 'watching')
-          .then(() => {
-            setPasteToast(`Added ${copiedDeal.startupName} to tracker`);
-            setTimeout(() => setPasteToast(null), 3000);
-            setCopiedDeal(null);
-          })
-          .catch((err) => {
-            console.error('Failed to paste deal:', err);
-            setPasteToast('Failed to add to tracker');
-            setTimeout(() => setPasteToast(null), 3000);
-          });
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [
-    currentView,
-    selectedDeal,
-    feedbackOpen,
-    aircraftTrackerOpen,
-    settingsOpen,
-    selectedDealIdx,
-    pagination.deals,
-    copiedDeal,
-  ]);
-
-  // Reset selection when deals change (page change, filter change)
-  useEffect(() => {
-    setSelectedDealIdx(-1);
-  }, [pagination.offset, filters]);
-
   const handleRefresh = () => {
     invalidateCache();
     loadDeals(0);
     loadSystemStatus();
   };
+
 
   const handleExport = () => {
     // Use same Option C filter logic as loadDeals
@@ -476,44 +400,24 @@ function App() {
     window.open(url, '_blank');
   };
 
-  const handlePageChange = (newOffset: number) => {
-    loadDeals(newOffset);
-  };
+  const handleLoadMore = useCallback(() => {
+    if (pagination.hasMore) {
+      loadDeals(pagination.offset + PAGE_SIZE, true);
+    }
+  }, [pagination.hasMore, pagination.offset, loadDeals]);
 
   const handleSortChange = useCallback((direction: SortDirection) => {
     // Update sort direction in filters - this triggers API refetch via useEffect
     setFilters((prev) => ({ ...prev, sortDirection: direction }));
   }, []);
 
-  // Handle deal click - set both selected deal and index
-  const handleDealClick = useCallback((deal: Deal) => {
-    const idx = pagination.deals.findIndex((d) => d.id === deal.id);
-    if (idx !== -1) {
-      setSelectedDealIdx(idx);
-    }
-    // Save scroll position before opening modal
-    const tableContainer = document.querySelector('.overflow-auto.scrollbar-hide');
-    if (tableContainer) {
-      savedScrollPos.current = tableContainer.scrollTop;
-    }
-    setSelectedDeal(deal);
-  }, [pagination.deals]);
-
   return (
-    <div className="h-screen flex flex-col bg-[#050506] text-slate-300 font-['JetBrains_Mono',monospace]">
-      {/* Header */}
-      <CommandHeader
-        systemStatus={systemStatus}
-        onSettingsClick={() => setSettingsOpen(true)}
-        onPreFundingClick={() => setCurrentView('prefunding')}
-        onMenuClick={() => setMobileMenuOpen(true)}
-      />
-
-      {/* Main Layout */}
+    <div className="h-screen flex bg-[#050506] text-slate-300 font-['JetBrains_Mono',monospace]">
+      {/* Main Layout - no header, content starts immediately */}
       <div className="flex-1 flex overflow-hidden relative">
         {/* Sidebar - hidden on mobile (shown via drawer), visible on desktop */}
         <div
-          className={`hidden md:block h-full transition-all duration-300 ease-in-out shrink-0 ${
+          className={`hidden md:block h-full transition-all duration-150 ease-in-out shrink-0 ${
             sidebarCollapsed ? 'w-0 overflow-hidden' : 'w-64'
           }`}
         >
@@ -548,7 +452,7 @@ function App() {
         {/* Sidebar Toggle Button - hidden on mobile, visible on desktop */}
         <button
           onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-          className={`hidden md:flex absolute top-1/2 -translate-y-1/2 z-20 items-center justify-center w-4 h-8 bg-slate-900/80 hover:bg-slate-700 border border-slate-800 hover:border-slate-600 rounded-r text-slate-600 hover:text-slate-300 opacity-40 hover:opacity-100 transition-all duration-300 ${
+          className={`hidden md:flex absolute top-1/2 -translate-y-1/2 z-20 items-center justify-center w-4 h-8 bg-slate-900/80 hover:bg-slate-700 border border-slate-800 hover:border-slate-600 rounded-r text-slate-600 hover:text-slate-300 opacity-40 hover:opacity-100 transition-all duration-150 ${
             sidebarCollapsed ? 'left-0' : 'left-64'
           }`}
           title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
@@ -562,12 +466,18 @@ function App() {
 
         {/* Main Content */}
         <main className="flex-1 flex flex-col overflow-hidden">
+          {/* Mobile menu button - no header, just a floating button */}
+          <button
+            onClick={() => setMobileMenuOpen(true)}
+            className="md:hidden absolute top-3 left-3 z-30 flex items-center justify-center w-10 h-10 text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 rounded transition-colors"
+            aria-label="Toggle menu"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+
           {/* Dashboard View */}
           {currentView === 'dashboard' && (
             <>
-              {/* Stats Cards */}
-              <StatsCards stats={stats} />
-
               {/* Scan Progress Bar - shows when scan is running */}
               {(() => {
                 if (!systemStatus.nextScrape) return null;
@@ -605,15 +515,15 @@ function App() {
                   <DealsTable
                     deals={pagination.deals}
                     pagination={pagination}
-                    onDealClick={handleDealClick}
+                    onDealClick={setSelectedDeal}
                     onExport={handleExport}
                     onRefresh={handleRefresh}
-                    onPageChange={handlePageChange}
+                    onLoadMore={handleLoadMore}
                     isLoading={loading}
                     sortDirection={filters.sortDirection}
                     onSortChange={handleSortChange}
                     showRejected={filters.showRejected}
-                    selectedIndex={selectedDealIdx}
+                    modalOpen={!!selectedDeal}
                   />
                 </ErrorBoundary>
               </div>
@@ -634,12 +544,19 @@ function App() {
             </ErrorBoundary>
           )}
 
-          {/* Tracker View */}
-          {currentView === 'tracker' && (
+          {/* New Deals View - always mounted for instant display */}
+          <div className={currentView === 'new' ? 'flex flex-col flex-1 min-h-0' : 'hidden'}>
+            <ErrorBoundary>
+              <NewDeals />
+            </ErrorBoundary>
+          </div>
+
+          {/* Tracker View - always mounted, hidden when inactive */}
+          <div className={currentView === 'tracker' ? 'flex flex-col flex-1 min-h-0' : 'hidden'}>
             <ErrorBoundary>
               <Tracker />
             </ErrorBoundary>
-          )}
+          </div>
 
           {/* Scans View */}
           {currentView === 'scans' && (
@@ -659,29 +576,8 @@ function App() {
 
       {/* Deal Modal */}
       {selectedDeal && (
-        <DealModal
-          deal={selectedDeal}
-          onClose={() => {
-            setSelectedDeal(null);
-            // Restore scroll position after modal closes
-            requestAnimationFrame(() => {
-              const tableContainer = document.querySelector('.overflow-auto.scrollbar-hide');
-              if (tableContainer) {
-                tableContainer.scrollTop = savedScrollPos.current;
-              }
-            });
-          }}
-          onCopy={setCopiedDeal}
-        />
+        <DealModal deal={selectedDeal} onClose={() => setSelectedDeal(null)} />
       )}
-
-      {/* Paste Toast */}
-      {pasteToast && (
-        <div className="fixed bottom-4 right-4 bg-slate-800 text-white px-4 py-2 rounded-lg shadow-lg z-50 animate-fade-in">
-          {pasteToast}
-        </div>
-      )}
-
 
       {/* Feedback Modal */}
       {feedbackOpen && (

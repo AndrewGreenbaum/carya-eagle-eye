@@ -8,7 +8,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Trash2, Globe, Calendar, Building2, Target } from 'lucide-react';
+import { X } from 'lucide-react';
 import type { TrackerItem, TrackerStatus } from '../types';
 import { TRACKER_STATUS_LABELS } from '../types';
 
@@ -125,7 +125,7 @@ export function TrackerModal({
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/70 backdrop-blur-sm z-40 animate-fade-in"
+        className="fixed inset-0 bg-black/75 backdrop-blur-sm z-40"
         onClick={handleBackdropClick}
         aria-hidden="true"
       />
@@ -135,58 +135,50 @@ export function TrackerModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="tracker-modal-title"
-        className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-lg mx-4 bg-[#0a0a0c] border border-slate-800 rounded-lg shadow-2xl animate-slide-up"
+        className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-[520px] mx-4 bg-[#0a0a0f] border border-zinc-800/25 rounded-2xl shadow-2xl"
       >
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-slate-800">
-          <h2 id="tracker-modal-title" className="text-lg font-bold text-white">
-            {isCreating ? 'Add Company' : 'Edit Company'}
-          </h2>
-          <button
-            ref={closeButtonRef}
-            onClick={onClose}
-            className="p-2 hover:bg-slate-800 rounded transition-colors text-slate-400 hover:text-white"
-            aria-label="Close"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
+        {/* Close */}
+        <button
+          ref={closeButtonRef}
+          onClick={onClose}
+          className="absolute top-6 right-7 text-zinc-700 hover:text-zinc-400 transition-colors p-2"
+          aria-label="Close"
+        >
+          <X className="w-4 h-4" />
+        </button>
 
         {/* Form */}
         <form onSubmit={handleSubmit}>
-          <div className="p-4 space-y-4 max-h-[60vh] overflow-y-auto">
+          <div className="px-10 sm:px-14 pt-12 pb-8 max-h-[70vh] overflow-y-auto">
+            <h2 id="tracker-modal-title" className="text-[15px] font-semibold text-zinc-200 tracking-[-0.02em] mb-10">
+              {isCreating ? 'Add Company' : (formData.companyName || 'Edit Company')}
+            </h2>
+
             {/* Company Name */}
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1">
-                Company Name <span className="text-red-400">*</span>
+            <div className="mb-8">
+              <label className="block text-[10px] uppercase tracking-[0.1em] text-zinc-600 font-medium mb-3">
+                Company
               </label>
-              <div className="relative">
-                <Building2 className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                <input
-                  type="text"
-                  value={formData.companyName}
-                  onChange={(e) =>
-                    setFormData({ ...formData, companyName: e.target.value })
-                  }
-                  placeholder="Acme Inc."
-                  required
-                  className="w-full bg-slate-900 border border-slate-700 rounded pl-10 pr-3 py-2 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500/50"
-                />
-              </div>
+              <input
+                type="text"
+                value={formData.companyName}
+                onChange={(e) => setFormData({ ...formData, companyName: e.target.value })}
+                placeholder="Acme Inc."
+                required
+                className="w-full bg-transparent border-b border-zinc-800 py-2.5 text-sm text-zinc-50 placeholder:text-zinc-800 placeholder:font-light focus:outline-none focus:border-zinc-600 transition-colors"
+              />
             </div>
 
-            {/* Round Type & Amount */}
-            <div className="grid grid-cols-2 gap-3">
+            {/* Round & Amount */}
+            <div className="grid grid-cols-2 gap-8 mb-8">
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">
-                  Round Type
+                <label className="block text-[10px] uppercase tracking-[0.1em] text-zinc-600 font-medium mb-3">
+                  Round
                 </label>
                 <select
                   value={formData.roundType}
-                  onChange={(e) =>
-                    setFormData({ ...formData, roundType: e.target.value })
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500/50"
+                  onChange={(e) => setFormData({ ...formData, roundType: e.target.value })}
+                  className="w-full bg-transparent border-b border-zinc-800 py-2.5 text-sm text-zinc-50 focus:outline-none focus:border-zinc-600 appearance-none cursor-pointer transition-colors"
                 >
                   <option value="">Select...</option>
                   <option value="Pre-Seed">Pre-Seed</option>
@@ -199,92 +191,71 @@ export function TrackerModal({
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">
+                <label className="block text-[10px] uppercase tracking-[0.1em] text-zinc-600 font-medium mb-3">
                   Amount
                 </label>
                 <input
                   type="text"
                   value={formData.amount}
-                  onChange={(e) =>
-                    setFormData({ ...formData, amount: e.target.value })
-                  }
+                  onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
                   placeholder="$10M"
-                  className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500/50"
+                  className="w-full bg-transparent border-b border-zinc-800 py-2.5 text-sm text-zinc-50 placeholder:text-zinc-800 placeholder:font-light focus:outline-none focus:border-zinc-600 transition-colors"
                 />
               </div>
             </div>
 
             {/* Lead Investor */}
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1">
+            <div className="mb-8">
+              <label className="block text-[10px] uppercase tracking-[0.1em] text-zinc-600 font-medium mb-3">
                 Lead Investor
               </label>
               <input
                 type="text"
                 value={formData.leadInvestor}
-                onChange={(e) =>
-                  setFormData({ ...formData, leadInvestor: e.target.value })
-                }
+                onChange={(e) => setFormData({ ...formData, leadInvestor: e.target.value })}
                 placeholder="Sequoia Capital"
-                className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500/50"
+                className="w-full bg-transparent border-b border-zinc-800 py-2.5 text-sm text-zinc-50 placeholder:text-zinc-800 placeholder:font-light focus:outline-none focus:border-zinc-600 transition-colors"
               />
             </div>
 
             {/* Website */}
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1">
+            <div className="mb-8">
+              <label className="block text-[10px] uppercase tracking-[0.1em] text-zinc-600 font-medium mb-3">
                 Website
               </label>
-              <div className="relative">
-                <Globe className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                <input
-                  type="url"
-                  value={formData.website}
-                  onChange={(e) =>
-                    setFormData({ ...formData, website: e.target.value })
-                  }
-                  placeholder="https://acme.com"
-                  className="w-full bg-slate-900 border border-slate-700 rounded pl-10 pr-3 py-2 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500/50"
-                />
-              </div>
+              <input
+                type="url"
+                value={formData.website}
+                onChange={(e) => setFormData({ ...formData, website: e.target.value })}
+                placeholder="https://"
+                className="w-full bg-transparent border-b border-zinc-800 py-2.5 text-sm text-zinc-50 placeholder:text-zinc-800 placeholder:font-light focus:outline-none focus:border-zinc-600 transition-colors"
+              />
             </div>
 
             {/* Notes */}
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1">
+            <div className="mb-8">
+              <label className="block text-[10px] uppercase tracking-[0.1em] text-zinc-600 font-medium mb-3">
                 Notes
               </label>
               <textarea
                 value={formData.notes}
-                onChange={(e) =>
-                  setFormData({ ...formData, notes: e.target.value })
-                }
-                placeholder="Add any notes about this company..."
-                rows={3}
-                className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500/50 resize-none"
+                onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+                placeholder="Internal notes..."
+                rows={2}
+                className="w-full bg-transparent border-b border-zinc-800 py-2.5 text-sm text-zinc-50 placeholder:text-zinc-800 placeholder:font-light focus:outline-none focus:border-zinc-600 transition-colors resize-none"
               />
             </div>
 
-            {/* Pipeline Tracking Section */}
-            <div className="pt-3 border-t border-slate-800">
-              <h3 className="text-xs font-medium text-slate-500 uppercase mb-3">
-                Pipeline Status
-              </h3>
-            </div>
-
-            {/* Pipeline Status - visible for both create and edit */}
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1">
-                Status
-              </label>
-              <div className="relative">
-                <Target className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+            {/* Pipeline Section */}
+            <div className="border-t border-zinc-800/15 pt-8 mt-8">
+              <div className="mb-8">
+                <label className="block text-[10px] uppercase tracking-[0.1em] text-zinc-600 font-medium mb-3">
+                  Status
+                </label>
                 <select
                   value={formData.status}
-                  onChange={(e) =>
-                    setFormData({ ...formData, status: e.target.value as TrackerStatus })
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded pl-10 pr-3 py-2 text-white focus:outline-none focus:border-emerald-500/50 appearance-none cursor-pointer"
+                  onChange={(e) => setFormData({ ...formData, status: e.target.value as TrackerStatus })}
+                  className="w-full bg-transparent border-b border-zinc-800 py-2.5 text-sm text-zinc-50 focus:outline-none focus:border-zinc-600 appearance-none cursor-pointer transition-colors"
                 >
                   {(Object.entries(TRACKER_STATUS_LABELS) as [TrackerStatus, string][]).map(
                     ([value, label]) => (
@@ -295,68 +266,59 @@ export function TrackerModal({
                   )}
                 </select>
               </div>
-            </div>
 
-            {/* Additional Pipeline Fields (only for editing) */}
-            {!isCreating && (
-              <>
-                {/* Last Contact Date */}
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">
-                    Last Contact Date
-                  </label>
-                  <div className="relative">
-                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+              {/* Additional fields for editing */}
+              {!isCreating && (
+                <>
+                  <div className="mb-8">
+                    <label className="block text-[10px] uppercase tracking-[0.1em] text-zinc-600 font-medium mb-3">
+                      Next Step
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.nextStep}
+                      onChange={(e) => setFormData({ ...formData, nextStep: e.target.value })}
+                      placeholder="What's next?"
+                      className="w-full bg-transparent border-b border-zinc-800 py-2.5 text-sm text-zinc-50 placeholder:text-zinc-800 placeholder:font-light focus:outline-none focus:border-zinc-600 transition-colors"
+                    />
+                  </div>
+
+                  <div className="mb-8">
+                    <label className="block text-[10px] uppercase tracking-[0.1em] text-zinc-600 font-medium mb-3">
+                      Last Contact
+                    </label>
                     <input
                       type="date"
                       value={formData.lastContactDate}
-                      onChange={(e) =>
-                        setFormData({ ...formData, lastContactDate: e.target.value })
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded pl-10 pr-3 py-2 text-white focus:outline-none focus:border-emerald-500/50"
+                      onChange={(e) => setFormData({ ...formData, lastContactDate: e.target.value })}
+                      className="w-full bg-transparent border-b border-zinc-800 py-2.5 text-sm text-zinc-50 focus:outline-none focus:border-zinc-600 transition-colors"
                     />
                   </div>
-                </div>
-
-                {/* Next Step */}
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">
-                    Next Step
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.nextStep}
-                    onChange={(e) =>
-                      setFormData({ ...formData, nextStep: e.target.value })
-                    }
-                    placeholder="Schedule follow-up call"
-                    className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500/50"
-                  />
-                </div>
-              </>
-            )}
+                </>
+              )}
+            </div>
           </div>
 
           {/* Footer */}
-          <div className="flex items-center justify-between p-4 border-t border-slate-800">
-            {/* Delete Button */}
+          <div className="flex items-center justify-between px-10 sm:px-14 pb-10 pt-2">
+            {/* Delete */}
             {!isCreating && onDelete && (
               <div>
                 {showDeleteConfirm ? (
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-slate-400">Delete?</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-zinc-500">Delete?</span>
                     <button
                       type="button"
                       onClick={handleDelete}
                       disabled={isSubmitting}
-                      className="px-3 py-1 text-sm bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
+                      className="text-xs text-red-400 hover:text-red-300 transition-colors"
                     >
                       Yes
                     </button>
                     <button
                       type="button"
                       onClick={() => setShowDeleteConfirm(false)}
-                      className="px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded transition-colors"
+                      className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
                     >
                       No
                     </button>
@@ -365,32 +327,22 @@ export function TrackerModal({
                   <button
                     type="button"
                     onClick={() => setShowDeleteConfirm(true)}
-                    className="flex items-center gap-1 px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded transition-colors"
+                    className="text-xs text-zinc-700 hover:text-red-400 transition-colors py-2"
                   >
-                    <Trash2 className="w-4 h-4" />
                     Delete
                   </button>
                 )}
               </div>
             )}
 
-            {/* Action Buttons */}
-            <div className={`flex items-center gap-2 ${isCreating || !onDelete ? 'ml-auto' : ''}`}>
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-4 py-2 text-sm text-slate-400 hover:text-white hover:bg-slate-800 rounded transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={isSubmitting || !formData.companyName.trim()}
-                className="px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded font-medium transition-colors"
-              >
-                {isSubmitting ? 'Saving...' : isCreating ? 'Add Company' : 'Save Changes'}
-              </button>
-            </div>
+            {/* Save */}
+            <button
+              type="submit"
+              disabled={isSubmitting || !formData.companyName.trim()}
+              className={`text-xs font-medium text-emerald-500 hover:text-emerald-400 disabled:text-zinc-700 transition-colors py-2 ${isCreating || !onDelete ? 'ml-auto' : ''}`}
+            >
+              {isSubmitting ? 'Saving...' : 'Save'}
+            </button>
           </div>
         </form>
       </div>

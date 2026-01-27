@@ -4,7 +4,7 @@
 
 /* Base styles */
 body {
-  font-family: 'JetBrains Mono', Menlo, Monaco, Consolas, monospace;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background-color: #0a0a0c;
@@ -16,23 +16,14 @@ body {
   background-color: rgba(16, 185, 129, 0.3);
 }
 
-/* Custom scrollbar - dark theme */
+/* Hide all scrollbars globally */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  display: none;
 }
 
-::-webkit-scrollbar-track {
-  background: #0a0a0c;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #475569;
+* {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
 /* Hide scrollbar utility */
@@ -111,7 +102,7 @@ body {
 
 /* Table row hover effect */
 .deal-row {
-  @apply transition-colors duration-150;
+  @apply transition-colors duration-75;
 }
 
 .deal-row:hover {
@@ -145,32 +136,6 @@ body {
 
 .category-consumer,
 .category-not_enterprise {
-  @apply bg-slate-800 text-slate-500 border-slate-700;
-}
-
-/* Non-AI category badges */
-.category-crypto {
-  @apply bg-orange-500/10 text-orange-400 border-orange-500/30;
-}
-
-.category-fintech {
-  @apply bg-emerald-500/10 text-emerald-400 border-emerald-500/30;
-}
-
-.category-healthcare {
-  @apply bg-rose-500/10 text-rose-400 border-rose-500/30;
-}
-
-.category-hardware {
-  @apply bg-gray-500/10 text-gray-400 border-gray-500/30;
-}
-
-.category-saas {
-  @apply bg-sky-500/10 text-sky-400 border-sky-500/30;
-}
-
-.category-other,
-.category-not_ai {
   @apply bg-slate-800 text-slate-500 border-slate-700;
 }
 

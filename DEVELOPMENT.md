@@ -85,19 +85,27 @@ Article → Source Filter → Title Filter → Content Dedup → Keyword Filter 
 - `is_non_announcement_title()` - Skip year-in-review, interviews, job postings
 - `is_likely_funding_from_title()` - Require funding signals in title
 
-**Post-processing (12 steps):** *(all tracked in extraction_filter_stats)*
+**Post-processing (13 steps):** *(all tracked in extraction_filter_stats)*
 1. `_validate_round_type()` - correct invalid round types to UNKNOWN
 2. `_validate_confidence_score()` - clamp confidence to [0, 1]
 3. `_validate_company_in_text()` - reject hallucinated company names
-4. `_validate_founders_in_text()` - remove hallucinated founder names
-5. `_validate_investors_in_text()` - remove hallucinated investors (word boundary matching)
-6. `_verify_tracked_fund()` - downgrade weak evidence to LIKELY_LEAD
-7. `_is_crypto_deal()` → NOT_AI (threshold=4, AI signals protect legitimate deals)
-8. `_is_consumer_ai_deal()` → is_enterprise_ai=False
-9. `_is_consumer_fintech_deal()` → NOT_AI
-10. `_looks_like_article_title()` - reject titles as names
-11. `_is_background_mention()` - reject non-headline companies (proportional threshold)
-12. `_validate_deal_amount()` - flag suspicious amounts (updated 2025/2026 thresholds)
+4. `_validate_startup_not_fund()` - reject LP/fund structures (SEC Form D false positives)
+5. `_validate_founders_in_text()` - remove hallucinated founder names
+6. `_validate_investors_in_text()` - remove hallucinated investors (word boundary matching)
+7. `_verify_tracked_fund()` - downgrade weak evidence to LIKELY_LEAD
+8. `_is_crypto_deal()` → NOT_AI (threshold=4, AI signals protect legitimate deals)
+9. `_is_consumer_ai_deal()` → is_enterprise_ai=False
+10. `_is_consumer_fintech_deal()` → NOT_AI
+11. `_looks_like_article_title()` - reject titles as names
+12. `_is_background_mention()` - reject non-headline companies (proportional threshold)
+13. `_validate_deal_amount()` - flag suspicious amounts (updated 2025/2026 thresholds)
+
+**Fund structure rejection** (2026-01): Catches SEC Form D filings for LP structures:
+- Names ending with "Fund I/II/.../XVI" (roman numerals)
+- Names ending with "Fund 1/2/.../N" (numbers)
+- Names ending with ", LP" / ", LLC" / ", LLP"
+- Fund codes like "SP-1216 Fund I", "AU-0707 Fund III"
+- Safe: "Fundrise", "GoFundMe", "FundBox" (Fund not at end)
 
 **Confidence thresholds:** Default=0.50, External=0.40
 **Hybrid re-extract (2026-01):**

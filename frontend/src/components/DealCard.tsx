@@ -16,12 +16,7 @@ import {
   Building2,
   Bot,
   Database,
-  Bitcoin,
-  DollarSign,
-  Heart,
-  Wrench,
-  Cloud,
-  HelpCircle,
+  XCircle,
 } from 'lucide-react';
 import type { Deal, EnterpriseCategory, InvestmentStage } from '../types';
 import { STAGE_LABELS } from '../types';
@@ -30,11 +25,9 @@ interface DealCardProps {
   deal: Deal;
   onClick: () => void;
   showRejected?: boolean;
-  isSelected?: boolean;
-  cardRef?: (el: HTMLDivElement | null) => void;
 }
 
-export const DealCard = memo(function DealCard({ deal, onClick, showRejected = false, isSelected = false, cardRef }: DealCardProps) {
+export const DealCard = memo(function DealCard({ deal, onClick, showRejected = false }: DealCardProps) {
   const isRejected = !deal.investorRoles.includes('lead');
   const shouldDim = isRejected && !showRejected;
 
@@ -47,11 +40,10 @@ export const DealCard = memo(function DealCard({ deal, onClick, showRejected = f
 
   return (
     <div
-      ref={cardRef}
       onClick={onClick}
-      className={`bg-slate-900/50 border rounded-lg p-4 cursor-pointer active:bg-slate-800/50 transition-colors ${
+      className={`bg-slate-900/50 border border-slate-800 rounded-lg p-4 cursor-pointer active:bg-slate-800/50 transition-colors ${
         shouldDim ? 'opacity-60' : ''
-      } ${isSelected ? 'border-blue-500/50 bg-slate-800/50 ring-1 ring-blue-500/30' : 'border-slate-800'}`}
+      }`}
     >
       {/* Top row: Company name + Amount */}
       <div className="flex items-start justify-between gap-2 mb-2">
@@ -67,7 +59,7 @@ export const DealCard = memo(function DealCard({ deal, onClick, showRejected = f
           </div>
         </div>
         <div className="text-right shrink-0">
-          <div className="text-sm font-bold text-white">{deal.amountInvested}</div>
+          <div className="text-sm font-bold text-white">{deal.amountInvested?.replace(/\bmillion\b/gi, 'M').replace(/\bbillion\b/gi, 'B').replace(/(\d)\s+(M|B)\b/g, '$1$2')}</div>
           <div className="text-xs text-slate-500">{formatDate(deal.date)}</div>
         </div>
       </div>
@@ -82,7 +74,7 @@ export const DealCard = memo(function DealCard({ deal, onClick, showRejected = f
 
       {/* Bottom row: Category + Links */}
       <div className="flex items-center justify-between">
-        <CategoryBadge category={deal.enterpriseCategory} shouldDim={shouldDim} isRejected={isRejected} />
+        <CategoryBadge category={deal.enterpriseCategory} shouldDim={shouldDim} />
 
         <div className="flex items-center gap-2">
           {/* Website */}
@@ -140,54 +132,36 @@ function StageBadge({ stage, isRejected }: { stage: InvestmentStage; isRejected:
 }
 
 const CATEGORY_ICONS: Record<EnterpriseCategory, React.ReactNode> = {
-  // Enterprise AI
   infrastructure: <Cpu className="w-3 h-3 text-slate-400" />,
   security: <Shield className="w-3 h-3 text-slate-400" />,
   vertical_saas: <Building2 className="w-3 h-3 text-slate-400" />,
   agentic: <Bot className="w-3 h-3 text-slate-400" />,
   data_intelligence: <Database className="w-3 h-3 text-slate-400" />,
-  // Consumer AI
   consumer_ai: <Bot className="w-3 h-3 text-blue-400" />,
   gaming_ai: <Bot className="w-3 h-3 text-purple-400" />,
   social_ai: <Bot className="w-3 h-3 text-pink-400" />,
-  // Non-AI (specific categories)
-  crypto: <Bitcoin className="w-3 h-3 text-orange-400" />,
-  fintech: <DollarSign className="w-3 h-3 text-emerald-400" />,
-  healthcare: <Heart className="w-3 h-3 text-rose-400" />,
-  hardware: <Wrench className="w-3 h-3 text-gray-400" />,
-  saas: <Cloud className="w-3 h-3 text-sky-400" />,
-  other: <HelpCircle className="w-3 h-3 text-slate-500" />,
-  // Legacy
-  not_ai: <HelpCircle className="w-3 h-3 text-slate-500" />,
+  not_ai: <XCircle className="w-3 h-3 text-red-900" />,
 };
 
 function CategoryBadge({
   category,
   shouldDim,
-  isRejected,
 }: {
   category?: EnterpriseCategory;
   shouldDim: boolean;
-  isRejected?: boolean;
 }) {
-  const cat = category || 'other';
+  const cat = category || 'not_ai';
+  const icon = CATEGORY_ICONS[cat] || CATEGORY_ICONS['not_ai'];
   const isConsumerAi = cat === 'consumer_ai' || cat === 'gaming_ai' || cat === 'social_ai';
-  const isNonAi = ['crypto', 'fintech', 'healthcare', 'hardware', 'saas', 'other', 'not_ai'].includes(cat);
 
-  // Non-AI categories: only show specific label if NOT rejected (is a lead)
-  // Rejected non-AI deals just show "other"
-  if (isNonAi) {
-    const displayCat = (isRejected || cat === 'not_ai') ? 'other' : cat;
-    const icon = CATEGORY_ICONS[displayCat] || CATEGORY_ICONS['other'];
+  if (cat === 'not_ai') {
     return (
-      <div className={`category-badge category-${displayCat} text-[10px]`}>
+      <div className="category-badge category-not_ai text-[10px]">
         {icon}
-        {displayCat.replace('_', ' ')}
+        not ai
       </div>
     );
   }
-
-  const icon = CATEGORY_ICONS[cat] || CATEGORY_ICONS['other'];
 
   if (isConsumerAi) {
     return (
