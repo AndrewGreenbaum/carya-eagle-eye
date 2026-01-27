@@ -323,9 +323,31 @@ class DealExtraction(BaseModel):
     )
 
     # Quality signals
+    # FIX 2026-01: Separated confidence into distinct components for clearer semantics
+    # - extraction_confidence: Raw LLM confidence in extraction accuracy (before penalties)
+    # - lead_evidence_score: Quality of lead investor evidence (0-1, higher = stronger evidence)
+    # - confidence_score: Final combined score used for threshold decisions (backwards compatible)
+    extraction_confidence: Optional[float] = Field(
+        default=None,
+        ge=0.0, le=1.0,
+        description="Raw LLM confidence in extraction accuracy, before any penalties. "
+                    "None if not set (legacy extractions)."
+    )
+    lead_evidence_score: Optional[float] = Field(
+        default=None,
+        ge=0.0, le=1.0,
+        description="Quality score for lead investor evidence (0.0-1.0). "
+                    "1.0 = explicit 'led by' in snippet, 0.5 = weak evidence (snippet but no lead language), "
+                    "0.2 = very weak (no snippet provided at all). "
+                    "None if not a lead deal or not yet calculated."
+    )
     confidence_score: float = Field(
         ge=0.0, le=1.0,
-        description="Confidence in the extraction (0.0-1.0)"
+        description="Final confidence score after penalties (0.0-1.0). Used for threshold decisions."
+    )
+    penalty_breakdown: Optional[dict] = Field(
+        default=None,
+        description="Breakdown of penalties applied: {founders_removed: 0.03, investors_removed: 0.05, weak_evidence: 0.08}"
     )
     # Note: thesis_drift_score removed - was never used in API/frontend
 

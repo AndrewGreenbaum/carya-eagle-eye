@@ -1922,6 +1922,9 @@ async def extract_deal(
             # FIX (2026-01): Differentiate early exit scores (was 0.1)
             # No funding keywords = lowest confidence (0.05)
             confidence_score=0.05,
+            # FIX: Initialize extraction_confidence and penalty_breakdown for consistency
+            extraction_confidence=0.05,
+            penalty_breakdown={},
             # NEW: Mark as not a new announcement
             is_new_announcement=False,
             announcement_evidence=None,
@@ -1955,6 +1958,9 @@ async def extract_deal(
             # FIX (2026-01): Differentiate early exit scores (was 0.1)
             # Crypto detection = higher than no-keywords (0.15) since article is funding-related
             confidence_score=0.15,
+            # FIX: Initialize extraction_confidence and penalty_breakdown for consistency
+            extraction_confidence=0.15,
+            penalty_breakdown={},
             is_new_announcement=False,
             announcement_evidence=None,
             announcement_rejection_reason="Crypto/blockchain article - not an AI company",
@@ -2942,11 +2948,15 @@ def _validate_confidence_score(deal: DealExtraction) -> DealExtraction:
     This prevents invalid scores from causing issues downstream (e.g., negative
     probabilities in filtering logic, or scores > 1 skewing statistics).
 
+    FIX 2026-01: Now stores the raw LLM confidence in extraction_confidence before
+    any penalties are applied. This separates extraction quality from lead evidence
+    quality for clearer semantics.
+
     Args:
         deal: The extracted deal
 
     Returns:
-        Modified deal with confidence_score clamped to [0, 1]
+        Modified deal with confidence_score clamped to [0, 1] and extraction_confidence set
     """
     original_score = deal.confidence_score
 
@@ -2963,6 +2973,13 @@ def _validate_confidence_score(deal: DealExtraction) -> DealExtraction:
             f"CLAMPING confidence score > 1 for {deal.startup_name}: "
             f"{original_score:.3f} -> 1.0"
         )
+
+    # FIX 2026-01: Store the raw LLM confidence before any penalties
+    # This is the extraction quality score, separate from lead evidence quality
+    deal.extraction_confidence = deal.confidence_score
+
+    # Initialize penalty breakdown tracking
+    deal.penalty_breakdown = {}
 
     return deal
 
@@ -3028,6 +3045,11 @@ def _validate_founders_in_text(deal: DealExtraction, article_text: str) -> DealE
         # Smaller penalty than investors since founders are less critical for deal validity
         penalty = min(0.10, len(removed_founders) * 0.03)
         deal.confidence_score = max(0.0, deal.confidence_score - penalty)
+
+        # FIX 2026-01: Track penalty in breakdown for debugging/analytics
+        if deal.penalty_breakdown is not None:
+            deal.penalty_breakdown["founders_removed"] = penalty
+
         logger.debug(
             f"Reduced confidence by {penalty:.2f} for {deal.startup_name} "
             f"(removed {len(removed_founders)} hallucinated founders)"
@@ -3080,6 +3102,11 @@ def _validate_investors_in_text(deal: DealExtraction, article_text: str) -> Deal
         # Lead investors are more critical for deal validity, so larger penalty
         penalty = min(0.15, len(removed_leads) * 0.05)
         deal.confidence_score = max(0.0, deal.confidence_score - penalty)
+
+        # FIX 2026-01: Track penalty in breakdown for debugging/analytics
+        if deal.penalty_breakdown is not None:
+            deal.penalty_breakdown["investors_removed"] = penalty
+
         logger.debug(
             f"Reduced confidence by {penalty:.2f} for {deal.startup_name} "
             f"(removed {len(removed_leads)} hallucinated lead investors)"
@@ -3145,6 +3172,18 @@ def _verify_tracked_fund(deal: DealExtraction, article_text: str = "") -> DealEx
     # IMPROVED (2026-01): Now also checks full article text for lead language
     has_valid_snippet = _has_lead_language(deal.verification_snippet, article_text)
 
+    # FIX 2026-01: Calculate lead_evidence_score based on verification quality
+    # 1.0 = explicit "led by" in snippet, 0.5 = weak evidence, 0.0 = no evidence
+    if deal.tracked_fund_is_lead:
+        if has_valid_snippet:
+            deal.lead_evidence_score = 1.0  # Strong evidence - explicit lead language
+        elif deal.verification_snippet:
+            deal.lead_evidence_score = 0.5  # Weak evidence - snippet but no lead language
+        else:
+            deal.lead_evidence_score = 0.2  # Very weak - no snippet at all
+    else:
+        deal.lead_evidence_score = None  # Not a lead deal
+
     if deal.tracked_fund_is_lead and deal.verification_snippet and not has_valid_snippet:
         logger.warning(
             f"DOWNGRADING lead claim for {deal.startup_name}: "
@@ -3157,6 +3196,10 @@ def _verify_tracked_fund(deal: DealExtraction, article_text: str = "") -> DealEx
         # FIX (2026-01): Reduce confidence when lead evidence is weak
         deal.confidence_score = max(0.0, deal.confidence_score - 0.08)
 
+        # FIX 2026-01: Track penalty in breakdown for debugging/analytics
+        if deal.penalty_breakdown is not None:
+            deal.penalty_breakdown["weak_evidence"] = 0.08
+
     if deal.tracked_fund_is_lead and not deal.verification_snippet:
         logger.warning(
             f"DOWNGRADING lead claim for {deal.startup_name}: "
@@ -3168,6 +3211,10 @@ def _verify_tracked_fund(deal: DealExtraction, article_text: str = "") -> DealEx
         deal.tracked_fund_role = LeadStatus.LIKELY_LEAD
         # FIX (2026-01): Reduce confidence when lead evidence is weak
         deal.confidence_score = max(0.0, deal.confidence_score - 0.08)
+
+        # FIX 2026-01: Track penalty in breakdown for debugging/analytics
+        if deal.penalty_breakdown is not None:
+            deal.penalty_breakdown["weak_evidence"] = 0.08
 
     # FIX: Track ALL confirmed lead funds to record co-leads
     confirmed_lead_funds: list[tuple[str, str, str]] = []  # (slug, name, partner)
