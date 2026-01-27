@@ -42,17 +42,21 @@ _article_fetch_lock = asyncio.Lock()
 
 
 async def _get_article_fetch_client() -> httpx.AsyncClient:
-    """Get or create the shared HTTP client for article fetching."""
+    """Get or create the shared HTTP client for article fetching.
+
+    FIX 2026-01: Fixed broken double-checked locking pattern.
+    The first None check MUST be inside the lock to prevent race conditions
+    where multiple coroutines pass the first check before any acquires the lock.
+    """
     global _article_fetch_client
-    if _article_fetch_client is None or _article_fetch_client.is_closed:
-        async with _article_fetch_lock:
-            # Double-check after acquiring lock
-            if _article_fetch_client is None or _article_fetch_client.is_closed:
-                _article_fetch_client = httpx.AsyncClient(
-                    timeout=ARTICLE_FETCH_TIMEOUT,
-                    follow_redirects=True,
-                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-                )
+    # FIX: Lock acquisition BEFORE first None check to prevent race condition
+    async with _article_fetch_lock:
+        if _article_fetch_client is None or _article_fetch_client.is_closed:
+            _article_fetch_client = httpx.AsyncClient(
+                timeout=ARTICLE_FETCH_TIMEOUT,
+                follow_redirects=True,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
     return _article_fetch_client
 
 # Article fetching settings - use centralized config

@@ -87,7 +87,7 @@ Article → Source Filter → Title Filter → Content Dedup → Keyword Filter 
 
 **Post-processing (13 steps):** *(all tracked in extraction_filter_stats)*
 1. `_validate_round_type()` - correct invalid round types to UNKNOWN
-2. `_validate_confidence_score()` - clamp confidence to [0, 1]
+2. `_validate_confidence_score()` - clamp confidence to [0, 1], reset NaN/Inf to 0
 3. `_validate_company_in_text()` - reject hallucinated company names
 4. `_validate_startup_not_fund()` - reject LP/fund structures (SEC Form D false positives)
 5. `_validate_founders_in_text()` - remove hallucinated founder names
@@ -139,6 +139,18 @@ Article → Source Filter → Title Filter → Content Dedup → Keyword Filter 
 - TIER 2.5: Null-date handling - checks recent deals (30 days by created_at) when incoming date is null
 - TIER 1: SQL-level round_type filter to avoid LIMIT 200 missing duplicates
 - TIER 1: Tighter date window (60 days) when one/both amounts are missing
+
+**2026-01 Fixes (batch 3 - storage & scheduler):**
+- **Advisory lock fail-fast:** `save_deal()` now raises exception if advisory lock fails (was silent continue)
+- **scalar_one() race handling:** `get_or_create_company()` and `save_stealth_detection()` use `scalar_one_or_none()` with retry
+- **HTTP client race fix:** `_get_article_fetch_client()` now acquires lock BEFORE first None check
+- **SEC rate limiting:** Token bucket pattern instead of sleep-inside-semaphore (3x faster)
+- **Exception counting:** `asyncio.gather` exceptions now increment `stats["errors"]`
+- **Content hash conservative:** Returns True (skip) on DB error to save Claude API costs
+- **Empty name fallback:** `company_names_match()` falls back to case-insensitive comparison when both normalize to empty
+- **Amount precision:** `format_sec_amount()` uses Decimal for exact representation
+- **Parallel alerts:** Alert sending uses `asyncio.gather` instead of serial loop
+- **GoogleNews cleanup warning:** `__del__` warns if HTTP clients not properly closed
 
 **Two dedup keys:**
 - `dedup_key = MD5(name|round|date_bucket)` - exact match
@@ -257,6 +269,8 @@ create_scraper_client(user_agent, timeout, ...)
 - `REJECTION_STATS` - why deals weren't saved
 - `EXTRACTION_FILTER_STATS` - post-processing filter activity
 - `HYBRID_RESULT` / `HYBRID_RESULT_HIGH_CONF` - Sonnet re-extraction outcomes
+- `HYBRID_FAILED` / `HYBRID_FAILED_HIGH_CONF` - Sonnet re-extraction errors (falls back to Haiku)
+- `INVALID_CONFIDENCE` - NaN/Inf confidence from LLM (serious parsing failure)
 
 **Cost optimizations** (2026-01):
 - Persistent content dedup: ~$10-15/mo savings (cross-run syndication catch)

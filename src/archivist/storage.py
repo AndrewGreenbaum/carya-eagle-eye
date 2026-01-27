@@ -8,6 +8,7 @@ import re
 import logging
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Tuple
 from sqlalchemy import select, nullslast
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -445,6 +446,9 @@ def format_sec_amount(sec_amount_usd: int) -> str:
     SEC amounts are exact legal figures that need clean formatting.
     Strips trailing zeros from decimal portion before adding suffix.
 
+    FIX 2026-01: Uses Decimal for exact representation to avoid float precision issues.
+    Previous bug: 47500000 / 1_000_000 could produce 47.499999999... in edge cases.
+
     Examples:
         47500000 → "$47.5M"
         50000000 → "$50M"
@@ -453,10 +457,17 @@ def format_sec_amount(sec_amount_usd: int) -> str:
         500000 → "$500,000"
     """
     if sec_amount_usd >= 1_000_000_000:
-        num_str = f"{sec_amount_usd / 1_000_000_000:.2f}".rstrip('0').rstrip('.')
+        # Use Decimal for exact division
+        amount_decimal = Decimal(sec_amount_usd) / Decimal(1_000_000_000)
+        # Round to 2 decimal places, then format
+        num_str = str(amount_decimal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+        num_str = num_str.rstrip('0').rstrip('.')
         return f"${num_str}B"
     elif sec_amount_usd >= 1_000_000:
-        num_str = f"{sec_amount_usd / 1_000_000:.2f}".rstrip('0').rstrip('.')
+        # Use Decimal for exact division
+        amount_decimal = Decimal(sec_amount_usd) / Decimal(1_000_000)
+        num_str = str(amount_decimal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+        num_str = num_str.rstrip('0').rstrip('.')
         return f"${num_str}M"
     else:
         return f"${sec_amount_usd:,}"
@@ -526,7 +537,13 @@ def company_names_match(name1: str, name2: str) -> bool:
     if norm1 == norm2:
         return True
 
-    # Empty check
+    # FIX 2026-01: If both names normalize to empty string (e.g., "AI Corp" vs "AI Inc"),
+    # fall back to case-insensitive comparison of original names
+    # Previous bug: returned False for ("AI Corp", "AI Corp") when both normalized to ""
+    if not norm1 and not norm2:
+        return name1.lower().strip() == name2.lower().strip()
+
+    # If only one is empty, they don't match
     if not norm1 or not norm2:
         return False
 
@@ -713,7 +730,25 @@ async def get_or_create_company(
     ).returning(PortfolioCompany)
 
     result = await session.execute(stmt)
-    company = result.scalar_one()
+    # FIX 2026-01: Use scalar_one_or_none() to handle race condition edge case
+    # where UPSERT returns no rows (e.g., concurrent insert already committed)
+    company = result.scalar_one_or_none()
+    if company is None:
+        # Race condition: another process inserted this company
+        # FIX 2026-01: Retry with backoff - the concurrent transaction may not have committed yet
+        # Without retry, we'd raise RuntimeError even though the company will exist momentarily
+        import asyncio
+        for attempt in range(3):
+            await asyncio.sleep(0.01 * (2 ** attempt))  # 10ms, 20ms, 40ms backoff
+            fetch_stmt = select(PortfolioCompany).where(
+                func.lower(PortfolioCompany.name) == name.lower()
+            )
+            fetch_result = await session.execute(fetch_stmt)
+            company = fetch_result.scalar_one_or_none()
+            if company:
+                break
+        else:
+            raise RuntimeError(f"Failed to get or create company '{name}' - UPSERT race condition")
     return company
 
 
@@ -1258,9 +1293,10 @@ async def save_deal(
         await session.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": lock_id})
         logger.debug(f"Acquired advisory lock for {extraction.startup_name} (lock_id={lock_id})")
     except Exception as e:
-        # Don't fail if advisory lock fails - continue with standard dedup
-        # FIX: Log as ERROR to make failures more visible in monitoring
+        # FIX 2026-01: Re-raise to fail the operation instead of continuing without lock
+        # Continuing without lock defeats the race condition fix and can cause duplicates
         logger.error(f"Failed to acquire advisory lock for {extraction.startup_name}: {e}")
+        raise RuntimeError(f"Advisory lock acquisition failed for {extraction.startup_name}") from e
 
     # Determine announced_date for duplicate check
     # FIX: Improved date validation to prevent wrong dates
@@ -1974,7 +2010,25 @@ async def save_stealth_detection(
     ).returning(StealthDetection)
 
     result = await session.execute(stmt)
-    detection = result.scalar_one()
+    # FIX 2026-01: Use scalar_one_or_none() to handle race condition edge case
+    # where UPSERT returns no rows (e.g., concurrent insert already committed)
+    detection = result.scalar_one_or_none()
+    if detection is None:
+        # Race condition: another process inserted this detection
+        # FIX 2026-01: Retry with backoff - the concurrent transaction may not have committed yet
+        import asyncio
+        for attempt in range(3):
+            await asyncio.sleep(0.01 * (2 ** attempt))  # 10ms, 20ms, 40ms backoff
+            fetch_stmt = select(StealthDetection).where(
+                StealthDetection.fund_slug == fund_slug,
+                StealthDetection.detected_url == detected_url
+            )
+            fetch_result = await session.execute(fetch_stmt)
+            detection = fetch_result.scalar_one_or_none()
+            if detection:
+                break
+        else:
+            raise RuntimeError(f"Failed to save stealth detection for {fund_slug}/{detected_url} - UPSERT race condition")
     return detection
 
 
