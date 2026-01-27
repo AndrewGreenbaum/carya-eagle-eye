@@ -888,7 +888,9 @@ async def find_duplicate_deal(
             # This prevents false matches like "MEQ Probe" vs "MEQ Consulting"
             if len(normalized_company) >= 3 and len(existing_normalized) >= 3:
                 shorter_len = min(len(normalized_company), len(existing_normalized))
-                min_prefix_len = max(3, int(shorter_len * 0.6))
+                # FIX 2026-01: Require minimum 4-char absolute prefix to prevent false matches
+                # on short names like "MEQ" vs "MES" (was max(3, ...) which failed for 3-char names)
+                min_prefix_len = max(4, int(shorter_len * 0.6))
                 if normalized_company[:min_prefix_len] == existing_normalized[:min_prefix_len]:
                     logger.warning(
                         f"Found duplicate (TIER 4 prefix+exact): '{company_name}' {round_type} "
@@ -1234,9 +1236,31 @@ async def save_deal(
         - Deal is None if duplicate (article still linked to existing deal)
         - LeadDealAlertInfo is provided if this is a lead deal that needs an alert
           (FIX #20: alert should be sent AFTER transaction commits)
+
+    FIX 2026-01: Added advisory lock to serialize operations on the same company name.
+    This prevents race conditions where two concurrent requests both pass find_duplicate_deal()
+    and try to insert the same deal. The lock is released when the transaction commits.
     """
     # Lazy import to avoid circular import (storage -> harvester -> orchestrator -> storage)
     from ..harvester.fund_matcher import match_fund_name
+    from sqlalchemy import text
+
+    # FIX 2026-01: Acquire advisory lock on company name to prevent race condition
+    # This serializes deal saves for the same company across concurrent requests
+    # pg_advisory_xact_lock is released automatically when transaction commits/rolls back
+    company_name_normalized = normalize_company_name(extraction.startup_name).lower()
+    # FIX: Use 16 hex chars (64 bits) and mask to signed 64-bit range for better distribution
+    # Previous [:15] & 0x7FFFFFFF wasted 33 bits of the bigint range
+    lock_id = int(hashlib.md5(company_name_normalized.encode()).hexdigest()[:16], 16) & 0x7FFFFFFFFFFFFFFF
+    try:
+        # FIX: Use parameterized query to prevent SQL injection
+        # Using f-string with text() is a security vulnerability if pattern is copied
+        await session.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": lock_id})
+        logger.debug(f"Acquired advisory lock for {extraction.startup_name} (lock_id={lock_id})")
+    except Exception as e:
+        # Don't fail if advisory lock fails - continue with standard dedup
+        # FIX: Log as ERROR to make failures more visible in monitoring
+        logger.error(f"Failed to acquire advisory lock for {extraction.startup_name}: {e}")
 
     # Determine announced_date for duplicate check
     # FIX: Improved date validation to prevent wrong dates
@@ -1601,9 +1625,13 @@ async def save_deal(
     # If deal is None, a concurrent insert already created this deal
     # Find the existing deal by dedup_key and link the article to it
     if deal is None:
+        # FIX 2026-01: Log as RACE_CONDITION_PREVENTED for monitoring
+        # If this happens frequently, it indicates the advisory lock isn't working
+        # or there's high concurrent load on the same company
         logger.warning(
-            f"Race condition duplicate prevented by dedup_key: {extraction.startup_name} "
-            f"{extraction.round_label.value} (key={dedup_key})"
+            f"RACE_CONDITION_PREVENTED: {extraction.startup_name} "
+            f"{extraction.round_label.value} (key={dedup_key}) - "
+            f"concurrent insert already committed, linking article instead"
         )
         # Find the existing deal by dedup_key
         existing_stmt = select(Deal).where(Deal.dedup_key == dedup_key)
