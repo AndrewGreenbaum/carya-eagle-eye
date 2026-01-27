@@ -365,7 +365,7 @@ function NavItem({ label, active, onClick }: NavItemProps) {
       className={`w-full text-left py-2.5 font-mono text-[13px] transition-colors min-h-[44px] md:min-h-0 focus:outline-none ${
         active
           ? 'text-slate-100 font-medium'
-          : 'text-slate-700 hover:text-slate-400'
+          : 'text-slate-500 hover:text-slate-300'
       }`}
     >
       {label}
