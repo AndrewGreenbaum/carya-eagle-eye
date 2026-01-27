@@ -3926,6 +3926,42 @@ async def backfill_scan_counts(api_key: str = Depends(verify_api_key)):
     }
 
 
+@app.post("/scans/cleanup-stale")
+async def cleanup_stale_scans(api_key: str = Depends(verify_api_key)):
+    """
+    Mark scans stuck in 'running' for >1 hour as failed.
+
+    Use this to clean up scans that timed out before the timeout fix was deployed.
+    """
+    from .archivist.models import ScanJob
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(ScanJob).where(
+                ScanJob.status == "running",
+                ScanJob.started_at < cutoff
+            )
+        )
+        stale_scans = result.scalars().all()
+
+        scan_ids = []
+        for scan in stale_scans:
+            scan.status = "failed"
+            scan.error_message = "Marked as failed by cleanup (stuck >1 hour)"
+            scan.completed_at = datetime.now(timezone.utc)
+            scan_ids.append(scan.id)
+
+        await session.commit()
+
+    return {
+        "status": "success",
+        "cleaned_up": len(scan_ids),
+        "scan_ids": scan_ids,
+    }
+
+
 # ----- Cache Management -----
 
 @app.post("/cache/clear")
