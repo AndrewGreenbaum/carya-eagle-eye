@@ -87,7 +87,8 @@ class Deal(SQLModel, table=True):
     # Deduplication key (FIX Jan 2026: prevent race condition duplicates)
     # Hash of normalized_company_name + round_type + date_bucket
     # Unique constraint prevents parallel inserts of same deal
-    dedup_key: Optional[str] = Field(default=None, max_length=32, index=True)
+    # FIX 2026-01: Added unique=True to actually enforce constraint (was only indexed, not unique)
+    dedup_key: Optional[str] = Field(default=None, max_length=32, index=True, unique=True)
 
     # Secondary deduplication key based on amount (FIX Jan 2026: Parloa duplicate bug)
     # Hash of normalized_company_name + amount_bucket + date_bucket

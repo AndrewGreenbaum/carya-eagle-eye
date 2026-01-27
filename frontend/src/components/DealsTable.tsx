@@ -29,6 +29,7 @@ interface DealsTableProps {
   showRejected?: boolean;
   modalOpen?: boolean;
   nextScrape?: string;
+  onViewScans?: () => void;
 }
 
 export function DealsTable({
@@ -44,6 +45,7 @@ export function DealsTable({
   showRejected = false,
   modalOpen = false,
   nextScrape,
+  onViewScans,
 }: DealsTableProps) {
   void _onExport;
   void _onRefresh;
@@ -274,10 +276,13 @@ export function DealsTable({
             <span className="text-sm text-slate-500">({pagination.total})</span>
           </div>
           {countdown && (
-            <div className="flex items-center gap-2 text-xs text-slate-500">
+            <button
+              onClick={onViewScans}
+              className="flex items-center gap-2 text-xs text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+            >
               <span>next scan</span>
               <span className="text-slate-400 font-medium tabular-nums">{countdown}</span>
-            </div>
+            </button>
           )}
         </div>
 

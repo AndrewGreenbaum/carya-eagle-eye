@@ -543,3 +543,200 @@ class TestConfidenceScoringIntegration:
         assert result.confidence_score == 0.80
         assert len(result.founders) == 1
         assert len(result.lead_investors) == 1
+
+
+# =============================================================================
+# Separated Confidence Fields Tests (2026-01)
+# =============================================================================
+class TestSeparatedConfidenceFields:
+    """Tests for the new separated confidence scoring fields."""
+
+    def test_extraction_confidence_preserved(self):
+        """extraction_confidence should store the raw LLM confidence before penalties."""
+        from src.analyst.extractor import (
+            _validate_confidence_score,
+            _validate_founders_in_text,
+        )
+
+        # Create deal with raw confidence of 0.80
+        deal = _make_deal(
+            confidence_score=0.80,
+            founders=[
+                FounderInfo(name="Fake Founder Alpha", title="CEO"),  # Will be removed
+            ],
+        )
+        article_text = "TestCorp announced funding today."
+
+        # First validate confidence score (this should set extraction_confidence)
+        result = _validate_confidence_score(deal)
+
+        # extraction_confidence should be set to original value
+        assert result.extraction_confidence == 0.80
+        assert result.penalty_breakdown == {}
+
+        # Now apply founder validation (penalty)
+        result = _validate_founders_in_text(result, article_text)
+
+        # extraction_confidence should still be 0.80 (original)
+        assert result.extraction_confidence == 0.80
+        # confidence_score should be reduced
+        assert result.confidence_score == 0.77  # 0.80 - 0.03
+
+    def test_penalty_breakdown_tracks_founders(self):
+        """penalty_breakdown should track founder removal penalty."""
+        from src.analyst.extractor import (
+            _validate_confidence_score,
+            _validate_founders_in_text,
+        )
+
+        deal = _make_deal(
+            confidence_score=0.80,
+            founders=[
+                FounderInfo(name="Fake One Alpha", title="CEO"),
+                FounderInfo(name="Fake Two Beta", title="CTO"),
+            ],
+        )
+        article_text = "TestCorp announced funding today."
+
+        result = _validate_confidence_score(deal)
+        result = _validate_founders_in_text(result, article_text)
+
+        assert result.penalty_breakdown is not None
+        assert "founders_removed" in result.penalty_breakdown
+        assert result.penalty_breakdown["founders_removed"] == 0.06  # 2 * 0.03
+
+    def test_penalty_breakdown_tracks_investors(self):
+        """penalty_breakdown should track investor removal penalty."""
+        from src.analyst.extractor import (
+            _validate_confidence_score,
+            _validate_investors_in_text,
+        )
+
+        deal = _make_deal(
+            confidence_score=0.80,
+            lead_investors=[
+                InvestorMention(name="Fake Capital One", role=LeadStatus.CONFIRMED_LEAD),
+                InvestorMention(name="Fake Capital Two", role=LeadStatus.CONFIRMED_LEAD),
+            ],
+        )
+        article_text = "TestCorp announced funding today."
+
+        result = _validate_confidence_score(deal)
+        result = _validate_investors_in_text(result, article_text)
+
+        assert result.penalty_breakdown is not None
+        assert "investors_removed" in result.penalty_breakdown
+        assert result.penalty_breakdown["investors_removed"] == 0.10  # 2 * 0.05
+
+    def test_penalty_breakdown_tracks_weak_evidence(self):
+        """penalty_breakdown should track weak evidence penalty."""
+        from src.analyst.extractor import (
+            _validate_confidence_score,
+            _verify_tracked_fund,
+        )
+
+        deal = _make_deal(
+            confidence_score=0.80,
+            tracked_fund_is_lead=True,
+            tracked_fund_name="a16z",
+            verification_snippet=None,  # Missing snippet
+            lead_investors=[
+                InvestorMention(name="Andreessen Horowitz", role=LeadStatus.CONFIRMED_LEAD),
+            ],
+        )
+        article_text = "TestCorp raised $10M with Andreessen Horowitz."
+
+        result = _validate_confidence_score(deal)
+        result = _verify_tracked_fund(result, article_text)
+
+        assert result.penalty_breakdown is not None
+        assert "weak_evidence" in result.penalty_breakdown
+        assert result.penalty_breakdown["weak_evidence"] == 0.08
+
+    def test_lead_evidence_score_strong_evidence(self):
+        """lead_evidence_score should be 1.0 for explicit lead language."""
+        from src.analyst.extractor import (
+            _validate_confidence_score,
+            _verify_tracked_fund,
+        )
+
+        deal = _make_deal(
+            confidence_score=0.80,
+            tracked_fund_is_lead=True,
+            tracked_fund_name="a16z",
+            verification_snippet="The round was led by Andreessen Horowitz",  # Explicit lead language
+            lead_investors=[
+                InvestorMention(name="Andreessen Horowitz", role=LeadStatus.CONFIRMED_LEAD),
+            ],
+        )
+        article_text = "TestCorp raised $10M. The round was led by Andreessen Horowitz."
+
+        result = _validate_confidence_score(deal)
+        result = _verify_tracked_fund(result, article_text)
+
+        assert result.lead_evidence_score == 1.0
+
+    def test_lead_evidence_score_weak_evidence(self):
+        """lead_evidence_score should be 0.5 for snippet without lead language."""
+        from src.analyst.extractor import (
+            _validate_confidence_score,
+            _verify_tracked_fund,
+        )
+
+        deal = _make_deal(
+            confidence_score=0.80,
+            tracked_fund_is_lead=True,
+            tracked_fund_name="a16z",
+            verification_snippet="Andreessen Horowitz invested",  # No lead language
+            lead_investors=[
+                InvestorMention(name="Andreessen Horowitz", role=LeadStatus.CONFIRMED_LEAD),
+            ],
+        )
+        article_text = "TestCorp raised $10M. Andreessen Horowitz invested."
+
+        result = _validate_confidence_score(deal)
+        result = _verify_tracked_fund(result, article_text)
+
+        assert result.lead_evidence_score == 0.5
+
+    def test_lead_evidence_score_no_snippet(self):
+        """lead_evidence_score should be 0.2 for missing snippet."""
+        from src.analyst.extractor import (
+            _validate_confidence_score,
+            _verify_tracked_fund,
+        )
+
+        deal = _make_deal(
+            confidence_score=0.80,
+            tracked_fund_is_lead=True,
+            tracked_fund_name="a16z",
+            verification_snippet=None,  # No snippet
+            lead_investors=[
+                InvestorMention(name="Andreessen Horowitz", role=LeadStatus.CONFIRMED_LEAD),
+            ],
+        )
+        article_text = "TestCorp raised $10M with Andreessen Horowitz."
+
+        result = _validate_confidence_score(deal)
+        result = _verify_tracked_fund(result, article_text)
+
+        assert result.lead_evidence_score == 0.2
+
+    def test_lead_evidence_score_not_lead_deal(self):
+        """lead_evidence_score should be None for non-lead deals."""
+        from src.analyst.extractor import (
+            _validate_confidence_score,
+            _verify_tracked_fund,
+        )
+
+        deal = _make_deal(
+            confidence_score=0.80,
+            tracked_fund_is_lead=False,  # Not a lead deal
+            lead_investors=[],
+        )
+        article_text = "TestCorp raised $10M."
+
+        result = _validate_confidence_score(deal)
+        result = _verify_tracked_fund(result, article_text)
+
+        assert result.lead_evidence_score is None

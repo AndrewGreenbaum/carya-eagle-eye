@@ -6,6 +6,7 @@ import {
   Loader2,
   ChevronDown,
   ChevronRight,
+  ChevronLeft,
   Building2,
   Users,
   TrendingUp,
@@ -502,7 +503,11 @@ function ScanRow({ scan, isExpanded, onToggle }: { scan: Scan; isExpanded: boole
   );
 }
 
-export function ScansPage() {
+interface ScansPageProps {
+  onBack?: () => void;
+}
+
+export function ScansPage({ onBack }: ScansPageProps = {}) {
   const [scans, setScans] = useState<Scan[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -551,7 +556,16 @@ export function ScansPage() {
       <div className="border-b border-slate-800 bg-slate-900/50">
         <div className="max-w-7xl mx-auto px-4 py-6">
           <div className="flex items-center justify-between">
-            <div>
+            <div className="flex items-center gap-3">
+              {onBack && (
+                <button
+                  onClick={onBack}
+                  className="flex items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                  <span className="text-sm">Deals</span>
+                </button>
+              )}
               <h1 className="text-2xl font-bold">Scan History</h1>
             </div>
             <button

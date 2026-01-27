@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Depends, Security, Query, Request, R
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, nullslast, nullsfirst
 from sqlalchemy.orm import selectinload
@@ -45,6 +45,7 @@ from .archivist import (
     DealInvestor,
     PortfolioCompany,
 )
+from .archivist.database import get_pool_status
 from .archivist.tracker_storage import (
     get_tracker_items,
     get_tracker_item,
@@ -303,11 +304,21 @@ class ExtractionResponse(BaseModel):
     announcement_rejection_reason: Optional[str] = None
 
 
+class PoolStatus(BaseModel):
+    """Database connection pool status for monitoring."""
+    pool_size: int
+    max_overflow: int
+    checked_in: int
+    checked_out: int
+    total_connections: int
+
+
 class HealthResponse(BaseModel):
     status: str
     timestamp: datetime
     tracked_funds: int
     implemented_scrapers: int
+    pool_status: Optional[PoolStatus] = None
 
 
 class TokenUsageBySource(BaseModel):
@@ -395,42 +406,160 @@ class PaginatedDealsResponse(BaseModel):
     has_more: bool
 
 
+# Valid values for round_type and enterprise_category
+VALID_ROUND_TYPES = {
+    "pre_seed", "seed", "seed_plus_series_a", "series_a", "series_b",
+    "series_c", "series_d", "series_e_plus", "growth", "debt", "unknown"
+}
+VALID_ENTERPRISE_CATEGORIES = {
+    "infrastructure", "security", "vertical_saas", "agentic", "data_intelligence",
+    "consumer_ai", "gaming_ai", "social_ai", "crypto", "fintech", "healthcare",
+    "hardware", "saas", "other", "not_ai"
+}
+
+
+class FounderInput(BaseModel):
+    """Validated founder input for deal updates."""
+    name: str = Field(..., min_length=1, max_length=200, description="Founder's full name")
+    title: Optional[str] = Field(default=None, max_length=100, description="Title/role")
+    linkedin_url: Optional[str] = Field(default=None, max_length=500, description="LinkedIn profile URL")
+
+    @field_validator('linkedin_url')
+    @classmethod
+    def validate_linkedin_url(cls, v: Optional[str]) -> Optional[str]:
+        """Validate LinkedIn URL format if provided."""
+        if v is None or v.strip() == "":
+            return None
+        v = v.strip()
+        if not v.startswith(('http://', 'https://')):
+            v = f"https://{v}"
+        # Must be a LinkedIn profile URL
+        if 'linkedin.com/in/' not in v.lower():
+            raise ValueError("LinkedIn URL must be a profile URL (linkedin.com/in/...)")
+        return v
+
+
 class UpdateDealRequest(BaseModel):
-    """Request body for updating a deal."""
-    company_name: Optional[str] = None
-    website: Optional[str] = None
-    linkedin_url: Optional[str] = None
-    round_type: Optional[str] = None
-    amount: Optional[str] = None
-    announced_date: Optional[str] = None  # ISO format: YYYY-MM-DD
+    """Request body for updating a deal.
+
+    FIX 2026-01: Added input validation to prevent malformed data injection.
+    """
+    company_name: Optional[str] = Field(default=None, max_length=255)
+    website: Optional[str] = Field(default=None, max_length=500)
+    linkedin_url: Optional[str] = Field(default=None, max_length=500)
+    round_type: Optional[str] = Field(default=None, max_length=50)
+    amount: Optional[str] = Field(default=None, max_length=100)
+    announced_date: Optional[str] = Field(default=None, max_length=10)  # ISO format: YYYY-MM-DD
     is_lead_confirmed: Optional[bool] = None
-    lead_partner_name: Optional[str] = None
-    enterprise_category: Optional[str] = None
+    lead_partner_name: Optional[str] = Field(default=None, max_length=255)
+    enterprise_category: Optional[str] = Field(default=None, max_length=50)
     is_enterprise_ai: Optional[bool] = None
     is_ai_deal: Optional[bool] = None  # FIX 2026-01: Allow updating AI classification
-    founders: Optional[List[dict]] = None  # List of {name, title, linkedin_url}
+    founders: Optional[List[FounderInput]] = None  # Validated founder list
     # Amount validation flags (for manual flagging)
     amount_needs_review: Optional[bool] = None
-    amount_review_reason: Optional[str] = None
+    amount_review_reason: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator('round_type')
+    @classmethod
+    def validate_round_type(cls, v: Optional[str]) -> Optional[str]:
+        """Validate round_type is a known value."""
+        if v is None:
+            return None
+        v = v.strip().lower()
+        if v not in VALID_ROUND_TYPES:
+            raise ValueError(f"Invalid round_type '{v}'. Valid values: {sorted(VALID_ROUND_TYPES)}")
+        return v
+
+    @field_validator('enterprise_category')
+    @classmethod
+    def validate_enterprise_category(cls, v: Optional[str]) -> Optional[str]:
+        """Validate enterprise_category is a known value."""
+        if v is None:
+            return None
+        v = v.strip().lower()
+        if v not in VALID_ENTERPRISE_CATEGORIES:
+            raise ValueError(f"Invalid enterprise_category '{v}'. Valid values: {sorted(VALID_ENTERPRISE_CATEGORIES)}")
+        return v
+
+    @field_validator('website')
+    @classmethod
+    def validate_website(cls, v: Optional[str]) -> Optional[str]:
+        """Validate website URL format if provided."""
+        if v is None or v.strip() == "":
+            return None
+        v = v.strip()
+        if not v.startswith(('http://', 'https://')):
+            v = f"https://{v}"
+        # Basic URL format check
+        if '.' not in v or len(v) < 10:
+            raise ValueError("Invalid website URL format")
+        return v
+
+    @field_validator('linkedin_url')
+    @classmethod
+    def validate_linkedin_url(cls, v: Optional[str]) -> Optional[str]:
+        """Validate LinkedIn URL format if provided."""
+        if v is None or v.strip() == "":
+            return None
+        v = v.strip()
+        if not v.startswith(('http://', 'https://')):
+            v = f"https://{v}"
+        # Must be a LinkedIn URL
+        if 'linkedin.com/' not in v.lower():
+            raise ValueError("URL must be a LinkedIn URL")
+        return v
+
+    @field_validator('announced_date')
+    @classmethod
+    def validate_announced_date(cls, v: Optional[str]) -> Optional[str]:
+        """Validate date is in ISO format YYYY-MM-DD."""
+        if v is None or v.strip() == "":
+            return None
+        v = v.strip()
+        import re
+        if not re.match(r'^\d{4}-\d{2}-\d{2}$', v):
+            raise ValueError("Date must be in ISO format: YYYY-MM-DD")
+        # Verify it's a valid date
+        from datetime import datetime
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError("Invalid date")
+        return v
 
 
 # ----- Endpoints -----
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint (cached for 5 minutes)."""
-    cached = cache.get("health")
-    if cached:
-        return cached
+    """Health check endpoint with pool monitoring.
+
+    FIX 2026-01: Added pool_status to detect connection exhaustion early.
+    Pool status is always fresh (not cached) for accurate monitoring.
+    """
+    # Get fresh pool status (don't cache - need real-time monitoring)
+    try:
+        pool_info = get_pool_status()
+        pool_status = PoolStatus(
+            pool_size=pool_info["pool_size"],
+            max_overflow=pool_info["max_overflow"],
+            checked_in=pool_info["checked_in"],
+            checked_out=pool_info["checked_out"],
+            total_connections=pool_info["total_connections"],
+        )
+    except Exception as e:
+        logger.warning(f"Failed to get pool status: {e}")
+        pool_status = None
 
     response = HealthResponse(
         status="healthy",
         timestamp=datetime.now(timezone.utc),
         tracked_funds=len(FUND_REGISTRY),
-        implemented_scrapers=len(get_implemented_scrapers())
+        implemented_scrapers=len(get_implemented_scrapers()),
+        pool_status=pool_status,
     )
 
-    cache.set("health", response, ttl_seconds=300)
     return response
 
 
@@ -973,7 +1102,8 @@ async def update_deal_endpoint(
             # Convert founders list to JSON string if provided
             founders_json = None
             if request.founders is not None:
-                founders_json = json.dumps(request.founders)
+                # Convert FounderInput models to dicts for JSON serialization
+                founders_json = json.dumps([f.model_dump(exclude_none=True) for f in request.founders])
 
             # Update the deal
             deal = await update_deal(

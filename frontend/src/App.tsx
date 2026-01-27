@@ -525,6 +525,7 @@ function App() {
                     showRejected={filters.showRejected}
                     modalOpen={!!selectedDeal}
                     nextScrape={systemStatus.nextScrape}
+                    onViewScans={() => setCurrentView('scans')}
                   />
                 </ErrorBoundary>
               </div>
@@ -562,7 +563,7 @@ function App() {
           {/* Scans View */}
           {currentView === 'scans' && (
             <ErrorBoundary>
-              <ScansPage />
+              <ScansPage onBack={() => setCurrentView('dashboard')} />
             </ErrorBoundary>
           )}
 
