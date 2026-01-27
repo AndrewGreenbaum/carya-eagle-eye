@@ -693,7 +693,8 @@ class BraveSearchScraper:
         return results
 
     # Funds with disabled/weak website scrapers - covered by partner queries instead
-    EXTERNAL_ONLY_FUNDS = {"benchmark", "thrive", "first_round", "khosla", "founders_fund", "gv", "greylock"}
+    # FIX (2026-01): Import from config.funds instead of hardcoding (was missing "redpoint")
+    # Now uses the single source of truth from config/funds.py
 
     async def search_partner_names_parallel(
         self,
@@ -884,14 +885,20 @@ class BraveSearchScraper:
         articles = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Filter out exceptions and log them
+        # FIX (2026-01): Count errors for accurate reporting (was logging but not counting)
         valid_articles = []
+        error_count = 0
         for i, article in enumerate(articles):
             if isinstance(article, Exception):
                 logger.warning(f"Error fetching article: {article}")
+                error_count += 1
             else:
                 valid_articles.append(article)
 
-        logger.info(f"Fetched {len(valid_articles)}/{len(results)} articles in parallel")
+        if error_count > 0:
+            logger.warning(f"SCRAPER_HEALTH_ALERT: {error_count} article fetch errors in batch")
+
+        logger.info(f"Fetched {len(valid_articles)}/{len(results)} articles in parallel ({error_count} errors)")
         return valid_articles
 
     async def scrape_all(

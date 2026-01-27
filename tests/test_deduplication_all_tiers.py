@@ -694,14 +694,19 @@ class TestTier25(BaseDeduplicationTest):
     async def test_tier25_valuation_funding_confusion(self, mock_session):
         """
         TIER 2.5 should catch when valuation is reported as funding amount.
-        FIX 2026-01: Valuation confusion allowed when larger amount >= $500M
+        FIX 2026-01 (stricter): Valuation confusion allowed only when:
+        - Ratio is 8-12x (classic funding/valuation pattern)
+        - Both amounts >= $50M
+        - Larger amount >= $400M
+
+        Example: $50M funding with $500M valuation = 10x ratio (allowed)
         """
         existing = self.create_mock_deal(
             deal_id=450,
             company_name="Valuation Corp",
             round_type="series_c",
-            amount="$330M",  # Actual funding
-            amount_usd=330_000_000,
+            amount="$50M",  # Actual funding
+            amount_usd=50_000_000,
             announced_date=date(2026, 1, 10)
         )
 
@@ -711,7 +716,7 @@ class TestTier25(BaseDeduplicationTest):
             [],  # TIER 3
             [],  # TIER 2 exact
             [],  # TIER 2 fuzzy
-            [existing],  # TIER 2.5 (valuation confusion allowed when >$500M)
+            [existing],  # TIER 2.5 (valuation pattern: 10x ratio, both > $50M)
             [],  # TIER 1 (not reached)
         ])
 
@@ -719,7 +724,7 @@ class TestTier25(BaseDeduplicationTest):
             session=mock_session,
             company_name="Valuation Corp",
             round_type="series_c",
-            amount="$6.6B",  # Valuation reported as funding (>$500M so allowed)
+            amount="$500M",  # Valuation reported as funding (10x = within 8-12x)
             announced_date=date(2026, 1, 12)  # 2 days later
         )
 
@@ -1327,16 +1332,19 @@ class TestRealWorldScenarios(BaseDeduplicationTest):
     async def test_valuation_vs_funding_duplicate(self, mock_session):
         """
         Real scenario: Same deal reported with different amounts.
-        - Source A: $330M funding (actual)
-        - Source B: $6.6B valuation (incorrectly reported as funding)
-        FIX 2026-01: Valuation confusion allowed when larger amount >= $500M
+        - Source A: $60M funding (actual)
+        - Source B: $600M valuation (incorrectly reported as funding)
+        FIX 2026-01 (stricter): Valuation confusion allowed only when:
+        - Ratio is 8-12x (classic funding/valuation pattern)
+        - Both amounts >= $50M
+        - Larger amount >= $400M
         """
         original = self.create_mock_deal(
             deal_id=1100,
             company_name="BigValuation Corp",
             round_type="series_c",
-            amount="$330M",
-            amount_usd=330_000_000,
+            amount="$60M",
+            amount_usd=60_000_000,
             announced_date=date(2026, 1, 10)
         )
 
@@ -1346,7 +1354,7 @@ class TestRealWorldScenarios(BaseDeduplicationTest):
             [],  # TIER 3 (amount too different)
             [],  # TIER 2 exact (different day)
             [],  # TIER 2 fuzzy
-            [original],  # TIER 2.5 (same round + date within 30 days, valuation confusion allowed)
+            [original],  # TIER 2.5 (same round + date within 30 days, 10x = valuation pattern)
             [],  # TIER 1 (not reached)
         ])
 
@@ -1354,7 +1362,7 @@ class TestRealWorldScenarios(BaseDeduplicationTest):
             session=mock_session,
             company_name="BigValuation Corp",
             round_type="series_c",
-            amount="$6.6B",  # Valuation, not funding! (>$500M so allowed)
+            amount="$600M",  # Valuation, not funding! (10x ratio = classic pattern)
             announced_date=date(2026, 1, 12)  # 2 days later
         )
 

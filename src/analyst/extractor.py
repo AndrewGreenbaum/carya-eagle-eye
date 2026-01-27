@@ -651,6 +651,8 @@ STRONG_FUNDING_KEYWORDS = [
     # NEW: Common funding verbs that were missing (causing false negatives)
     "closes", "gets", "bags", "nabs", "receives", "wins",
     "grabs", "pulls", "attracts", "lands", "raise",  # "raise" = noun form
+    # FIX (2026-01): "led" standalone for "has led" phrasing (e.g., "GV has led a $40M investment")
+    "led", "invests",
 ]
 AMOUNT_KEYWORDS = ["million", "billion", "$", "mn", "m funding"]  # "mn" = Indian format
 SUPPORTING_KEYWORDS = [
@@ -2716,14 +2718,21 @@ def _investor_in_text(investor_name: str, text_lower: str) -> bool:
 
         Uses word boundary for short names (<8 chars) to prevent false positives.
         Uses substring for longer names which are more distinctive.
+
+        FIX (2026-01): Excludes matches that are part of URLs to prevent false
+        positives like "GV" matching "gv.com" or "a16z" matching "a16z.com".
         """
         if len(name) < 8:
             # Short names (GV, USV, Index, Accel) need word boundary
-            pattern = rf'\b{re.escape(name)}\b'
+            # FIX: Exclude URL patterns - don't match if preceded by . or / or followed by .com/.org/etc
+            # Pattern: name must NOT be preceded by [./] or followed by .[a-z]
+            pattern = rf'(?<![./])\b{re.escape(name)}\b(?!\.[a-z])'
             return bool(re.search(pattern, text))
         else:
             # Longer names are distinctive enough for substring
-            return name in text
+            # But still exclude URL patterns
+            pattern = rf'(?<![./]){re.escape(name)}(?!\.[a-z])'
+            return bool(re.search(pattern, text))
 
     # Direct match (with word boundary for short names)
     if _check_with_boundary(inv_lower, text_lower):
@@ -3131,8 +3140,14 @@ def _validate_founders_in_text(deal: DealExtraction, article_text: str) -> DealE
         increment_extraction_stat("founders_removed", len(removed_founders))
         deal.founders = validated_founders
 
-        # FIX (2026-01): Reduce confidence when hallucinated founders are removed
-        # Smaller penalty than investors since founders are less critical for deal validity
+        # FIX (2026-01): Only penalize HALLUCINATED founders (extracted but not in text)
+        # NOT missing founders (when article doesn't mention any founder)
+        # Early-stage deals often don't name founders - that's fine (no penalty)
+        # But fabricated founder names indicate LLM hallucination (small penalty)
+        #
+        # Key distinction:
+        # - deal.founders=[] (no founders extracted) → no penalty
+        # - deal.founders extracted but not in text → penalty per hallucinated name
         penalty = min(0.10, len(removed_founders) * 0.03)
         deal.confidence_score = max(0.0, deal.confidence_score - penalty)
 
@@ -3311,7 +3326,9 @@ def _verify_tracked_fund(deal: DealExtraction, article_text: str = "") -> DealEx
 
     # Check ALL lead investors against our fund registry
     for investor in deal.lead_investors:
-        matched_fund = match_fund_name(investor.name)
+        # FIX (2026-01): Pass article_text to enable partner name → fund attribution
+        # e.g., "Bill Gurley" → "benchmark" only when investment context is present
+        matched_fund = match_fund_name(investor.name, context_text=article_text)
         # FIX: Validate matched_fund exists in FUND_REGISTRY before using
         if matched_fund and matched_fund in FUND_REGISTRY:
             investor.is_tracked_fund = True
@@ -3362,7 +3379,8 @@ def _verify_tracked_fund(deal: DealExtraction, article_text: str = "") -> DealEx
 
     # Also check ALL participating investors
     for investor in deal.participating_investors:
-        matched_fund = match_fund_name(investor.name)
+        # FIX (2026-01): Pass article_text to enable partner name → fund attribution
+        matched_fund = match_fund_name(investor.name, context_text=article_text)
         # FIX: Validate matched_fund exists in FUND_REGISTRY before using
         if matched_fund and matched_fund in FUND_REGISTRY:
             investor.is_tracked_fund = True

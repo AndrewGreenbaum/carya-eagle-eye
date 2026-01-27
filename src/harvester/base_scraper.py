@@ -10,6 +10,7 @@ Implements the PolymorphicScraper pattern with:
 import asyncio
 import logging
 import random
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, date, timezone
@@ -213,11 +214,19 @@ class BaseScraper(ABC):
         raise httpx.HTTPError(f"Failed to fetch {url} after {max_retries} attempts")
 
     def _should_filter(self, article: RawArticle) -> bool:
-        """Check if article should be filtered based on fund's negative keywords."""
+        """Check if article should be filtered based on fund's negative keywords.
+
+        FIX (2026-01): Uses word boundary matching instead of substring to prevent
+        false positives like "Benchmark International" matching "benchmark" keyword.
+        This matches the behavior of fund_matcher.py for consistency.
+        """
         text = f"{article.title} {article.html}".lower()
 
         for keyword in self.fund.negative_keywords:
-            if keyword.lower() in text:
+            # Use word boundary for accurate matching (prevents "Benchmark" from
+            # matching "benchmarking" or "Benchmark Electronics")
+            pattern = rf'\b{re.escape(keyword.lower())}\b'
+            if re.search(pattern, text):
                 return True
 
         return False
