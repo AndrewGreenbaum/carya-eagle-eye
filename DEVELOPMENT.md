@@ -60,6 +60,7 @@ POST /scrapers/sec-edgar?hours=24
 POST /scrapers/google-news?days_back=30
 GET  /deals?is_lead=true&is_enterprise_ai=true&fund_slug=a16z
 POST /enrichment/deals?limit=50&offset=0&skip_enriched=true
+GET  /enrichment/stats  # Returns coverage: with_both, missing_both, etc.
 GET  /health | /scheduler/status | /scans
 ```
 **API Key:** `X-API-Key: dev-key`
@@ -192,6 +193,13 @@ POST /enrichment/deals?limit=50&offset=0&skip_enriched=false&force_update=true
 - **URL regex:** Anchored to prevent false matches (e.g., `notlinkedin.com`)
 - **Website verification:** Checks final URL domain after redirects (rejects redirect to linkedin.com, crunchbase.com, etc.)
 - **URL validation:** All URLs sanitized and validated before DB persistence (`sanitize_url()` + `is_valid_website_url()`)
+
+**2026-01 Fixes (batch 5 - enrichment):**
+- **Cache poisoning fix:** LinkedIn URLs only cached as "success" AFTER validation passes (was caching before validation, poisoning cache with invalid URLs)
+- **Case-insensitive founder lookup:** `main.py` normalizes founder names to lowercase when matching enrichment results (was losing data when "John Smith" vs "john smith")
+- **TLD whitelist expanded:** Added 19 TLDs - European (de, ch, nl, fr, se, no, at, be, fi, dk, es, it, pl) and industry (studio, solutions, systems, ventures, fund, consulting)
+- **Short company name handling:** Companies with 2-3 char names (like "GV", "AI") require exact domain match only
+- **Stats endpoint enhanced:** `GET /enrichment/stats` now includes `with_both` and `missing_both` fields
 
 ## Frontend
 **Stack:** React + Vite + Tailwind

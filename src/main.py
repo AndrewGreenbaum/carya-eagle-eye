@@ -76,7 +76,7 @@ from .harvester import (
     get_implemented_scrapers,
     get_unimplemented_scrapers,
 )
-from .scheduler import setup_scheduler, shutdown_scheduler
+from .scheduler import setup_scheduler, shutdown_scheduler, start_stuck_monitor, stop_stuck_monitor
 from .scheduler import jobs as scheduler_module
 import re
 from urllib.parse import quote
@@ -215,11 +215,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Warning: Could not start scheduler: {e}")
 
+    # FIX 2026-01: Start stuck scan monitor (detects silently crashed scans)
+    try:
+        await start_stuck_monitor()
+        print("StuckScanMonitor started - detecting crashed scans")
+    except Exception as e:
+        print(f"Warning: Could not start StuckScanMonitor: {e}")
+
     yield
 
     # Graceful shutdown - close all resources
     print("Shutting down...")
     shutdown_scheduler()
+
+    # FIX 2026-01: Stop stuck scan monitor
+    try:
+        await stop_stuck_monitor()
+        print("StuckScanMonitor stopped")
+    except Exception as e:
+        print(f"Warning: Error stopping StuckScanMonitor: {e}")
 
     # Close database connections
     try:
