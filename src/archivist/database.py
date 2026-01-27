@@ -15,14 +15,15 @@ logger = logging.getLogger(__name__)
 
 
 # Create async engine with connection pooling optimizations
-# FIX: Increased pool size to handle concurrent scraping (was 5/10, caused exhaustion)
+# FIX 2026-01: Increased pool to 100 total (was 50, caused exhaustion at 2x scale)
+# Railway PostgreSQL allows up to 100 connections by default
 engine = create_async_engine(
     settings.database_url,
     echo=False,
-    pool_size=20,         # Increased from 5 to handle concurrent operations
-    max_overflow=30,      # Increased from 10 (total max: 50 connections)
+    pool_size=30,         # Base pool size (persistent connections)
+    max_overflow=70,      # Overflow connections (total max: 100)
     pool_pre_ping=True,   # Detect stale connections before use
-    pool_recycle=3600,    # Recycle connections every hour
+    pool_recycle=1800,    # Recycle connections every 30 min (was 1hr, helps with stale)
     pool_timeout=30,      # Wait max 30s for connection from pool
     connect_args={
         "command_timeout": 30,  # Timeout for individual queries (asyncpg)
@@ -49,6 +50,30 @@ async def init_db():
 async def close_db():
     """Close database connections."""
     await engine.dispose()
+
+
+def get_pool_status() -> dict:
+    """Get connection pool status for monitoring.
+
+    Returns dict with:
+    - pool_size: Base number of persistent connections
+    - max_overflow: Additional connections allowed beyond pool_size
+    - checked_in: Connections currently available in pool
+    - checked_out: Connections currently in use
+    - overflow: Current overflow connections in use
+    - total_connections: checked_out + checked_in
+
+    Use in /health endpoint to monitor pool exhaustion before it causes failures.
+    """
+    pool = engine.pool
+    return {
+        "pool_size": pool.size(),
+        "max_overflow": pool.overflow(),
+        "checked_in": pool.checkedin(),
+        "checked_out": pool.checkedout(),
+        "overflow": pool.overflow(),
+        "total_connections": pool.checkedin() + pool.checkedout(),
+    }
 
 
 @asynccontextmanager
