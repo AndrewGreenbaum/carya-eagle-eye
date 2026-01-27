@@ -2292,7 +2292,11 @@ async def scheduled_scrape_job(trigger: str = "scheduled"):
 
 
 async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
-    """Internal implementation of scheduled_scrape_job (separated for timeout wrapper)."""
+    """Internal implementation of scheduled_scrape_job (separated for timeout wrapper).
+
+    FIX 2026-01: Now wrapped with ScanJobGuard for heartbeat monitoring and
+    guaranteed status updates even on crash/OOM.
+    """
     global _last_job_run, _last_job_status, _last_job_error, _last_job_duration, _current_scan_job_id
 
     job_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -2306,6 +2310,7 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
     # Create ScanJob record in database
     from ..archivist.models import ScanJob
     from ..archivist.database import get_session
+    from .scan_guard import guarded_scan
     import json
 
     scan_job_db_id = None
@@ -2315,6 +2320,7 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
                 job_id=job_id,
                 status="running",
                 trigger=trigger,
+                last_heartbeat=datetime.now(timezone.utc),  # FIX 2026-01: Initialize heartbeat
             )
             session.add(scan_job)
             await session.commit()
@@ -2340,204 +2346,217 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
 
     start_time = datetime.now(timezone.utc)
 
-    try:
-        # ===== PHASE 1: Scrape fund websites =====
-        fund_slugs = get_implemented_scrapers()
-        logger.info(f"[{job_id}] Phase 1: Scraping {len(fund_slugs)} fund websites")
+    # FIX 2026-01: Wrap phase execution with ScanJobGuard for heartbeat monitoring
+    # and guaranteed status updates even on crash/OOM
+    async with guarded_scan(scan_job_db_id, job_id) as guard:
+        try:
+            # ===== PHASE 1: Scrape fund websites =====
+            fund_slugs = get_implemented_scrapers()
+            logger.info(f"[{job_id}] Phase 1: Scraping {len(fund_slugs)} fund websites")
 
-        # Run scrapers with parallel=True, max 3 concurrent
-        results = await scrape_all_funds(
-            fund_slugs=fund_slugs,
-            parallel=True,
-            max_parallel_funds=3,
-            scan_job_id=scan_job_db_id,
-        )
+            # Run scrapers with parallel=True, max 3 concurrent
+            results = await scrape_all_funds(
+                fund_slugs=fund_slugs,
+                parallel=True,
+                max_parallel_funds=3,
+                scan_job_id=scan_job_db_id,
+            )
 
-        # Calculate Phase 1 stats
-        fund_articles = sum(r.articles_found for r in results)
-        fund_deals = sum(r.deals_saved for r in results)
-        fund_errors = sum(len(r.errors) for r in results)
+            # Calculate Phase 1 stats
+            fund_articles = sum(r.articles_found for r in results)
+            fund_deals = sum(r.deals_saved for r in results)
+            fund_errors = sum(len(r.errors) for r in results)
 
-        logger.info(
-            f"[{job_id}] Phase 1 complete: "
-            f"articles={fund_articles}, deals={fund_deals}, errors={fund_errors}"
-        )
+            logger.info(
+                f"[{job_id}] Phase 1 complete: "
+                f"articles={fund_articles}, deals={fund_deals}, errors={fund_errors}"
+            )
 
-        # ===== PHASE 2: Scrape external sources (THE FIX) =====
-        logger.info(f"[{job_id}] Phase 2: Scraping external sources (Brave Search, SEC, etc.)")
+            # ===== PHASE 2: Scrape external sources (THE FIX) =====
+            logger.info(f"[{job_id}] Phase 2: Scraping external sources (Brave Search, SEC, etc.)")
 
-        external_results = await scrape_external_sources(days=7, scan_job_id=scan_job_db_id)
-        external_deals = external_results.get("total_deals_saved", 0)
+            external_results = await scrape_external_sources(days=7, scan_job_id=scan_job_db_id)
+            external_deals = external_results.get("total_deals_saved", 0)
 
-        logger.info(
-            f"[{job_id}] Phase 2 complete: "
-            f"external_deals={external_deals}"
-        )
+            logger.info(
+                f"[{job_id}] Phase 2 complete: "
+                f"external_deals={external_deals}"
+            )
 
-        # ===== Calculate total stats =====
-        total_deals = fund_deals + external_deals
-        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+            # ===== Calculate total stats =====
+            total_deals = fund_deals + external_deals
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
 
-        logger.info(
-            f"[{job_id}] Scrape complete: "
-            f"fund_deals={fund_deals}, external_deals={external_deals}, "
-            f"total_deals={total_deals}, duration={duration:.1f}s"
-        )
+            logger.info(
+                f"[{job_id}] Scrape complete: "
+                f"fund_deals={fund_deals}, external_deals={external_deals}, "
+                f"total_deals={total_deals}, duration={duration:.1f}s"
+            )
 
-        # ===== PHASE 3: Enrich new deals =====
-        # Always run enrichment to catch up on any missing data
-        logger.info(f"[{job_id}] Phase 3: Starting automatic enrichment (website + LinkedIn)")
-        # FIX #6: Increased from 50 to 100 to improve coverage (was taking weeks at 50)
-        enriched = await enrich_new_deals(limit=100)
-        logger.info(f"[{job_id}] Enrichment complete: {enriched} companies updated")
+            # ===== PHASE 3: Enrich new deals =====
+            # Always run enrichment to catch up on any missing data
+            logger.info(f"[{job_id}] Phase 3: Starting automatic enrichment (website + LinkedIn)")
+            # FIX #6: Increased from 50 to 100 to improve coverage (was taking weeks at 50)
+            enriched = await enrich_new_deals(limit=100)
+            logger.info(f"[{job_id}] Enrichment complete: {enriched} companies updated")
 
-        # ===== PHASE 4: Enrich deal dates =====
-        # FIX: Date enrichment was never running - all the code existed but wasn't called
-        logger.info(f"[{job_id}] Phase 4: Starting date enrichment (Brave + SEC verification)")
-        dates_enriched = await enrich_deal_dates(limit=50)
-        logger.info(f"[{job_id}] Date enrichment complete: {dates_enriched} deals updated")
+            # ===== PHASE 4: Enrich deal dates =====
+            # FIX: Date enrichment was never running - all the code existed but wasn't called
+            logger.info(f"[{job_id}] Phase 4: Starting date enrichment (Brave + SEC verification)")
+            dates_enriched = await enrich_deal_dates(limit=50)
+            logger.info(f"[{job_id}] Date enrichment complete: {dates_enriched} deals updated")
 
-        # Send notification
-        await send_scrape_summary(
-            job_id=job_id,
-            results=results,
-            duration_seconds=duration,
-            external_results=external_results,
-        )
+            # Send notification
+            await send_scrape_summary(
+                job_id=job_id,
+                results=results,
+                duration_seconds=duration,
+                external_results=external_results,
+            )
 
-        # Track job success
-        _last_job_status = "success"
-        _last_job_duration = duration
-        logger.info(f"[{job_id}] Job completed successfully in {duration:.1f}s")
+            # Track job success
+            _last_job_status = "success"
+            _last_job_duration = duration
+            logger.info(f"[{job_id}] Job completed successfully in {duration:.1f}s")
 
-        # Update ScanJob record with success
-        if scan_job_db_id:
-            try:
-                # Build fund scraper results dict (same format as external_results)
-                fund_results = {}
-                for r in results:
-                    fund_results[r.fund_slug] = {
-                        "articles_found": r.articles_found,
-                        "articles_received": r.articles_found,  # For consistency
-                        "deals_extracted": r.deals_extracted,
-                        "deals_saved": r.deals_saved,
-                        "articles_skipped_duplicate": r.articles_skipped_duplicate,
-                        "errors": len(r.errors),
-                        "error_message": r.errors[0] if r.errors else None,
-                    }
+            # FIX 2026-01: Signal guard that job succeeded (prevents guard from marking as failed)
+            if guard:
+                guard.set_success()
 
-                # Merge fund results + external results
-                all_source_results = {**fund_results, **external_results}
+            # Update ScanJob record with success
+            if scan_job_db_id:
+                try:
+                    # Build fund scraper results dict (same format as external_results)
+                    fund_results = {}
+                    for r in results:
+                        fund_results[r.fund_slug] = {
+                            "articles_found": r.articles_found,
+                            "articles_received": r.articles_found,  # For consistency
+                            "deals_extracted": r.deals_extracted,
+                            "deals_saved": r.deals_saved,
+                            "articles_skipped_duplicate": r.articles_skipped_duplicate,
+                            "errors": len(r.errors),
+                            "error_message": r.errors[0] if r.errors else None,
+                        }
 
-                # Calculate totals from all sources
-                total_articles = fund_articles
-                total_extracted = sum(r.deals_extracted for r in results)
-                total_saved = fund_deals
-                total_duplicates = sum(r.articles_skipped_duplicate for r in results)
-                total_errors = fund_errors
+                    # Merge fund results + external results
+                    all_source_results = {**fund_results, **external_results}
 
-                for source_name, stats in external_results.items():
-                    if source_name.startswith("_") or source_name == "total_deals_saved":
-                        continue
-                    if isinstance(stats, dict) and "error" not in stats:
-                        total_articles += stats.get("articles_received", 0)
-                        total_extracted += stats.get("deals_extracted", 0)
-                        total_saved += stats.get("deals_saved", 0)
-                        total_duplicates += stats.get("articles_skipped_duplicate", 0)
-                        total_errors += stats.get("errors", 0)
+                    # Calculate totals from all sources
+                    total_articles = fund_articles
+                    total_extracted = sum(r.deals_extracted for r in results)
+                    total_saved = fund_deals
+                    total_duplicates = sum(r.articles_skipped_duplicate for r in results)
+                    total_errors = fund_errors
 
-                # Query actual deal counts from database (most accurate)
-                async with get_session() as session:
-                    from sqlalchemy import select, func, Integer
-                    from ..archivist.models import Deal
+                    for source_name, stats in external_results.items():
+                        if source_name.startswith("_") or source_name == "total_deals_saved":
+                            continue
+                        if isinstance(stats, dict) and "error" not in stats:
+                            total_articles += stats.get("articles_received", 0)
+                            total_extracted += stats.get("deals_extracted", 0)
+                            total_saved += stats.get("deals_saved", 0)
+                            total_duplicates += stats.get("articles_skipped_duplicate", 0)
+                            total_errors += stats.get("errors", 0)
 
-                    # Count lead deals and enterprise AI deals for this scan
-                    count_result = await session.execute(
-                        select(
-                            func.count(Deal.id).label("total"),
-                            func.sum(func.cast(Deal.is_lead_confirmed, Integer)).label("leads"),
-                            func.sum(func.cast(Deal.is_enterprise_ai, Integer)).label("enterprise_ai"),
-                        ).where(Deal.scan_job_id == scan_job_db_id)
-                    )
-                    counts = count_result.one()
-                    lead_deals = int(counts.leads or 0)
-                    enterprise_ai_deals = int(counts.enterprise_ai or 0)
-                    actual_total_saved = int(counts.total or 0)
+                    # Query actual deal counts from database (most accurate)
+                    async with get_session() as session:
+                        from sqlalchemy import select, func, Integer
+                        from ..archivist.models import Deal
 
-                    # Use actual count from DB (more reliable)
-                    if actual_total_saved > 0:
-                        total_saved = actual_total_saved
-
-                    # Update the scan job record
-                    stmt = select(ScanJob).where(ScanJob.id == scan_job_db_id)
-                    result = await session.execute(stmt)
-                    scan_job = result.scalar_one_or_none()
-                    if scan_job:
-                        scan_job.status = "success"
-                        scan_job.completed_at = datetime.now(timezone.utc)
-                        scan_job.duration_seconds = duration
-                        scan_job.total_articles_found = total_articles
-                        scan_job.total_deals_extracted = total_extracted
-                        scan_job.total_deals_saved = total_saved
-                        scan_job.total_duplicates_skipped = total_duplicates
-                        scan_job.total_errors = total_errors
-                        scan_job.lead_deals_found = lead_deals
-                        scan_job.enterprise_ai_deals_found = enterprise_ai_deals
-                        scan_job.source_results_json = json.dumps(all_source_results, default=str)
-                        await session.commit()
-                        logger.info(
-                            f"[{job_id}] Updated ScanJob: saved={total_saved}, "
-                            f"leads={lead_deals}, enterprise_ai={enterprise_ai_deals}"
+                        # Count lead deals and enterprise AI deals for this scan
+                        count_result = await session.execute(
+                            select(
+                                func.count(Deal.id).label("total"),
+                                func.sum(func.cast(Deal.is_lead_confirmed, Integer)).label("leads"),
+                                func.sum(func.cast(Deal.is_enterprise_ai, Integer)).label("enterprise_ai"),
+                            ).where(Deal.scan_job_id == scan_job_db_id)
                         )
+                        counts = count_result.one()
+                        lead_deals = int(counts.leads or 0)
+                        enterprise_ai_deals = int(counts.enterprise_ai or 0)
+                        actual_total_saved = int(counts.total or 0)
 
-                    # FIX (2026-01): Flush any remaining token usage records
-                    await flush_token_usage_batch(force=True)
-            except Exception as e:
-                logger.warning(f"[{job_id}] Failed to update ScanJob record: {e}")
-            finally:
-                # Clear global scan ID tracker
-                _current_scan_job_id = None
+                        # Use actual count from DB (more reliable)
+                        if actual_total_saved > 0:
+                            total_saved = actual_total_saved
 
-    except Exception as e:
-        logger.error(f"[{job_id}] Scrape job failed: {e}", exc_info=True)
-        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+                        # Update the scan job record
+                        stmt = select(ScanJob).where(ScanJob.id == scan_job_db_id)
+                        result = await session.execute(stmt)
+                        scan_job = result.scalar_one_or_none()
+                        if scan_job:
+                            scan_job.status = "success"
+                            scan_job.completed_at = datetime.now(timezone.utc)
+                            scan_job.duration_seconds = duration
+                            scan_job.total_articles_found = total_articles
+                            scan_job.total_deals_extracted = total_extracted
+                            scan_job.total_deals_saved = total_saved
+                            scan_job.total_duplicates_skipped = total_duplicates
+                            scan_job.total_errors = total_errors
+                            scan_job.lead_deals_found = lead_deals
+                            scan_job.enterprise_ai_deals_found = enterprise_ai_deals
+                            scan_job.source_results_json = json.dumps(all_source_results, default=str)
+                            await session.commit()
+                            logger.info(
+                                f"[{job_id}] Updated ScanJob: saved={total_saved}, "
+                                f"leads={lead_deals}, enterprise_ai={enterprise_ai_deals}"
+                            )
 
-        # Track job failure
-        _last_job_status = "failed"
-        _last_job_error = str(e)
-        _last_job_duration = duration
+                        # FIX (2026-01): Flush any remaining token usage records
+                        await flush_token_usage_batch(force=True)
+                except Exception as e:
+                    logger.warning(f"[{job_id}] Failed to update ScanJob record: {e}")
+                finally:
+                    # Clear global scan ID tracker
+                    _current_scan_job_id = None
 
-        # Update ScanJob record with failure
-        if scan_job_db_id:
-            try:
-                async with get_session() as session:
-                    from sqlalchemy import select
-                    stmt = select(ScanJob).where(ScanJob.id == scan_job_db_id)
-                    result = await session.execute(stmt)
-                    scan_job = result.scalar_one_or_none()
-                    if scan_job:
-                        scan_job.status = "failed"
-                        scan_job.completed_at = datetime.now(timezone.utc)
-                        scan_job.duration_seconds = duration
-                        scan_job.error_message = str(e)[:500]  # Truncate long errors
-                        await session.commit()
-                        logger.info(f"[{job_id}] Updated ScanJob record with failure")
+        except Exception as e:
+            logger.error(f"[{job_id}] Scrape job failed: {e}", exc_info=True)
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
 
-                    # FIX (2026-01): Flush any remaining token usage records
-                    await flush_token_usage_batch(force=True)
-            except Exception as update_err:
-                logger.warning(f"[{job_id}] Failed to update ScanJob failure: {update_err}")
-            finally:
-                # Clear global scan ID tracker
-                _current_scan_job_id = None
+            # Track job failure
+            _last_job_status = "failed"
+            _last_job_error = str(e)
+            _last_job_duration = duration
 
-        # Still try to send error notification
-        await send_scrape_summary(
-            job_id=job_id,
-            results=[],
-            duration_seconds=duration,
-            error=str(e)
-        )
+            # Update ScanJob record with failure
+            # Note: ScanJobGuard will also try to mark as failed, but this provides
+            # full statistics if the main pool is still available
+            if scan_job_db_id:
+                try:
+                    async with get_session() as session:
+                        from sqlalchemy import select
+                        stmt = select(ScanJob).where(ScanJob.id == scan_job_db_id)
+                        result = await session.execute(stmt)
+                        scan_job = result.scalar_one_or_none()
+                        if scan_job:
+                            scan_job.status = "failed"
+                            scan_job.completed_at = datetime.now(timezone.utc)
+                            scan_job.duration_seconds = duration
+                            scan_job.error_message = str(e)[:500]  # Truncate long errors
+                            await session.commit()
+                            logger.info(f"[{job_id}] Updated ScanJob record with failure")
+
+                        # FIX (2026-01): Flush any remaining token usage records
+                        await flush_token_usage_batch(force=True)
+                except Exception as update_err:
+                    # FIX 2026-01: If main pool fails, ScanJobGuard will handle status update
+                    logger.warning(f"[{job_id}] Failed to update ScanJob failure: {update_err}")
+                finally:
+                    # Clear global scan ID tracker
+                    _current_scan_job_id = None
+
+            # Still try to send error notification
+            await send_scrape_summary(
+                job_id=job_id,
+                results=[],
+                duration_seconds=duration,
+                error=str(e)
+            )
+
+            # Re-raise so guard can also mark as failed (backup mechanism)
+            raise
 
 
 def get_scan_schedule() -> tuple[CronTrigger, str]:

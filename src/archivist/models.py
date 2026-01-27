@@ -539,6 +539,13 @@ class ScanJob(SQLModel, table=True):
     # Trigger type
     trigger: str = Field(default="scheduled")  # scheduled, manual, api
 
+    # Heartbeat for stuck job detection (FIX 2026-01)
+    # Updated every 30s by ScanJobGuard; StuckScanMonitor marks as failed if stale > 2min
+    last_heartbeat: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True))
+    )
+
 
 class ContentHash(SQLModel, table=True):
     """Persistent content hash cache for cross-run deduplication.
