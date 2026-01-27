@@ -5,7 +5,6 @@
 import { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
 import type { TrackerColumn } from '../types';
-import { TRACKER_COLORS, TRACKER_COLOR_CLASSES } from '../types';
 
 interface TrackerColumnModalProps {
   column: TrackerColumn | null;
@@ -19,15 +18,21 @@ export function TrackerColumnModal({
   onSave,
 }: TrackerColumnModalProps) {
   const [displayName, setDisplayName] = useState(column?.displayName || '');
-  const [color, setColor] = useState(column?.color || 'slate');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (column) {
       setDisplayName(column.displayName);
-      setColor(column.color);
     }
   }, [column]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -40,36 +45,45 @@ export function TrackerColumnModal({
       setError('Column name must be 100 characters or less');
       return;
     }
-    onSave({ displayName: trimmedName, color });
+    onSave({ displayName: trimmedName, color: column?.color || 'slate' });
   };
 
   const isEditing = !!column;
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-slate-900 rounded-lg w-full max-w-md mx-4 shadow-xl">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
-          <h2 className="text-lg font-semibold text-white">
-            {isEditing ? 'Edit Column' : 'Add Column'}
-          </h2>
-          <button
-            onClick={onClose}
-            className="text-slate-400 hover:text-white transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
+    <>
+      {/* Backdrop */}
+      <div
+        className="fixed inset-0 bg-black/75 backdrop-blur-sm z-40"
+        onClick={onClose}
+        aria-hidden="true"
+      />
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-5">
-          {/* Column Name */}
+      {/* Modal */}
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-[380px] mx-4 bg-[#0a0a0f] border border-zinc-800/25 rounded-2xl shadow-2xl"
+      >
+        <button
+          onClick={onClose}
+          className="absolute top-6 right-7 text-zinc-700 hover:text-zinc-400 transition-colors p-2"
+          aria-label="Close"
+        >
+          <X className="w-4 h-4" />
+        </button>
+
+        <form onSubmit={handleSubmit} className="px-10 sm:px-12 py-10">
+          <h2 className="text-[15px] font-semibold text-zinc-200 tracking-[-0.02em] mb-10">
+            {isEditing ? 'Column' : 'Add Column'}
+          </h2>
+
           <div>
             <label
               htmlFor="displayName"
-              className="block text-sm font-medium text-slate-300 mb-1.5"
+              className="block text-[10px] uppercase tracking-[0.1em] text-zinc-600 font-medium mb-3"
             >
-              Column Name
+              Name
             </label>
             <input
               type="text"
@@ -79,79 +93,33 @@ export function TrackerColumnModal({
                 setDisplayName(e.target.value);
                 setError(null);
               }}
-              placeholder="e.g., Qualified, Due Diligence"
-              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500"
+              placeholder="e.g., Due Diligence"
+              className="w-full bg-transparent border-b border-zinc-800 py-2.5 text-sm text-zinc-50 placeholder:text-zinc-800 placeholder:font-light focus:outline-none focus:border-zinc-600 transition-colors"
               autoFocus
             />
-            {error && <p className="mt-1.5 text-sm text-red-400">{error}</p>}
+            {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
           </div>
 
-          {/* Color Picker */}
-          <div>
-            <label className="block text-sm font-medium text-slate-300 mb-2">
-              Column Color
-            </label>
-            <div className="flex flex-wrap gap-2">
-              {TRACKER_COLORS.map((c) => {
-                const classes = TRACKER_COLOR_CLASSES[c];
-                const isSelected = color === c;
-                return (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => setColor(c)}
-                    className={`w-8 h-8 rounded-full ${classes.dot} transition-all ${
-                      isSelected
-                        ? 'ring-2 ring-white ring-offset-2 ring-offset-slate-900'
-                        : 'hover:scale-110'
-                    }`}
-                    title={c.charAt(0).toUpperCase() + c.slice(1)}
-                    aria-label={`Select ${c} color`}
-                  />
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Preview */}
-          <div>
-            <label className="block text-sm font-medium text-slate-300 mb-2">
-              Preview
-            </label>
-            <div className="flex items-center gap-2 px-3 py-2 bg-slate-800 rounded">
-              <div
-                className={`w-2 h-2 rounded-full ${
-                  TRACKER_COLOR_CLASSES[color]?.dot || TRACKER_COLOR_CLASSES.slate.dot
-                }`}
-              />
-              <span className="text-white text-sm">
-                {displayName.trim() || 'Column Name'}
-              </span>
-              <span className="ml-auto px-2 py-0.5 text-xs bg-slate-700 text-slate-400 rounded-full">
-                0
-              </span>
-            </div>
-          </div>
-
-          {/* Actions */}
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-slate-300 hover:text-white transition-colors"
-            >
-              Cancel
-            </button>
+          <div className="flex items-center justify-between mt-12">
+            {isEditing && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="text-xs text-zinc-700 hover:text-red-400 transition-colors py-2"
+              >
+                Delete column
+              </button>
+            )}
             <button
               type="submit"
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-medium transition-colors"
+              className={`text-xs font-medium text-emerald-500 hover:text-emerald-400 transition-colors py-2 ${!isEditing ? 'ml-auto' : ''}`}
             >
-              {isEditing ? 'Save Changes' : 'Add Column'}
+              Save
             </button>
           </div>
         </form>
       </div>
-    </div>
+    </>
   );
 }
 

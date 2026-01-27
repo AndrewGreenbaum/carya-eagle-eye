@@ -2804,10 +2804,54 @@ def _validate_company_in_text(deal: DealExtraction, article_text: str) -> DealEx
 
 def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealExtraction:
     """
-    Reject deals where the startup name is actually a tracked VC fund.
-    Catches fund raises (e.g., "a16z raises $15B Fund VII") being saved as portfolio deals.
+    Reject deals where the startup name is actually a tracked VC fund or LP structure.
+    Catches:
+    - Fund raises (e.g., "a16z raises $15B Fund VII")
+    - LP structures from SEC filings (e.g., "SP-1216 Fund I", "AU-0707 Fund III", "Feld Ventures Fund, LP")
     """
     if not deal or not deal.startup_name:
+        return deal
+
+    name = deal.startup_name
+
+    # Check for LP/fund structure names (SEC Form D filings for investment vehicles)
+    # Pattern: "XX-1234 Fund I", "Name Fund III", "Name, LP", etc.
+    # These are investment funds, not startups
+    # Roman numerals: I-III, IV, V, VI-VIII, IX, X, XI-XIII, XIV, XV, XVI+
+    ROMAN_NUMERALS = r'(?:i{1,3}|iv|vi{0,3}|ix|xi{0,3}|xiv|xvi{0,3}|x{1,2}|xv)'
+    if re.search(rf'\bfund\s*({ROMAN_NUMERALS}|[0-9]+)?\s*,?\s*(lp|llc|llp)?$', name, re.IGNORECASE):
+        logger.warning(
+            f"Rejecting LP/fund structure: '{name}' - name ends with 'Fund' + roman numeral/LP"
+        )
+        increment_extraction_stat("fund_structure_rejected")
+        deal.is_new_announcement = False
+        deal.announcement_rejection_reason = (
+            f"Name looks like LP/fund structure: {name} (likely SEC Form D for investment vehicle)"
+        )
+        return deal
+
+    # Pattern: ends with ", LP" or ", LLC" (typical fund legal entities)
+    if re.search(r',\s*(lp|llc|llp)$', name, re.IGNORECASE):
+        logger.warning(
+            f"Rejecting LP entity: '{name}' - name ends with legal entity suffix"
+        )
+        increment_extraction_stat("fund_structure_rejected")
+        deal.is_new_announcement = False
+        deal.announcement_rejection_reason = (
+            f"Name looks like LP entity: {name} (likely fund structure, not startup)"
+        )
+        return deal
+
+    # Pattern: fund code format (e.g., "SP-1216", "AU-0707")
+    if re.search(r'^[A-Z]{2,4}-\d{3,}', name) and 'fund' in name.lower():
+        logger.warning(
+            f"Rejecting fund code: '{name}' - matches fund code pattern"
+        )
+        increment_extraction_stat("fund_structure_rejected")
+        deal.is_new_announcement = False
+        deal.announcement_rejection_reason = (
+            f"Name matches fund code pattern: {name}"
+        )
         return deal
 
     from src.harvester.fund_matcher import match_fund_name

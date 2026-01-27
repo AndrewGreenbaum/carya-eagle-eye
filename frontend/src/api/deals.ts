@@ -77,39 +77,6 @@ export function invalidateCache(prefix?: string): void {
 }
 
 // ============================================
-// Timeout & Error Handling
-// ============================================
-
-const DEFAULT_TIMEOUT_MS = 30000; // 30s - matches backend
-
-export class ApiTimeoutError extends Error {
-  constructor(message = 'Request timed out') {
-    super(message);
-    this.name = 'ApiTimeoutError';
-  }
-}
-
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit = {},
-  timeoutMs = DEFAULT_TIMEOUT_MS
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new ApiTimeoutError(`Request timed out after ${timeoutMs / 1000}s`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// ============================================
 // Request Helpers
 // ============================================
 
@@ -121,7 +88,7 @@ async function apiGet<T>(path: string, useCache = true): Promise<T> {
     if (cached) return cached;
   }
 
-  const response = await fetchWithTimeout(`${API_BASE}${path}`, {
+  const response = await fetch(`${API_BASE}${path}`, {
     headers: {
       'X-API-Key': API_KEY,
     },
@@ -138,7 +105,7 @@ async function apiGet<T>(path: string, useCache = true): Promise<T> {
 }
 
 async function apiPost<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetchWithTimeout(`${API_BASE}${path}`, {
+  const response = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -156,7 +123,7 @@ async function apiPost<T>(path: string, body?: unknown): Promise<T> {
 }
 
 async function apiPut<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetchWithTimeout(`${API_BASE}${path}`, {
+  const response = await fetch(`${API_BASE}${path}`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -174,7 +141,7 @@ async function apiPut<T>(path: string, body?: unknown): Promise<T> {
 }
 
 async function apiDelete(path: string): Promise<void> {
-  const response = await fetchWithTimeout(`${API_BASE}${path}`, {
+  const response = await fetch(`${API_BASE}${path}`, {
     method: 'DELETE',
     headers: {
       'X-API-Key': API_KEY,

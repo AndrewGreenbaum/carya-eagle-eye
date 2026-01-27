@@ -43,6 +43,20 @@ function saveSeen(seen: Set<string>) {
   localStorage.setItem(SEEN_KEY, JSON.stringify([...seen]));
 }
 
+// Filter out false positives - fund names extracted as company names
+function isLikelyFundName(name: string): boolean {
+  // Pattern: ends with "Fund" followed by optional roman numerals/numbers
+  // e.g., "SP-1216 Fund I", "AU-0707 Fund III", "Feld Ventures Fund, LP"
+  if (/\bfund\s*(i{1,3}|iv|v|vi{0,3}|[0-9]+)?\s*,?\s*(lp|llc|llp)?$/i.test(name)) return true;
+  // Contains "Fund" + LP/LLC at end
+  if (/\bfund.*\b(lp|llc|llp)$/i.test(name)) return true;
+  // Ends with ", LP" or ", LLC" (typical fund structure)
+  if (/,\s*(lp|llc|llp)$/i.test(name)) return true;
+  // Looks like a fund code (letters + numbers + "Fund")
+  if (/^[A-Z]{2,}-\d+\s+fund/i.test(name)) return true;
+  return false;
+}
+
 export function NewDeals() {
   const [deals, setDeals] = useState<ScanDeal[]>([]);
   const [scanTime, setScanTime] = useState<string>('');
@@ -71,7 +85,11 @@ export function NewDeals() {
       });
       if (!detailRes.ok) throw new Error('Failed to fetch scan details');
       const detail: Scan = await detailRes.json();
-      setDeals(detail.deals || []);
+      // Filter out false positives (fund names extracted as company names)
+      const filteredDeals = (detail.deals || []).filter(
+        (d: ScanDeal) => !isLikelyFundName(d.startup_name)
+      );
+      setDeals(filteredDeals);
       setScanTime(detail.completed_at || detail.started_at);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load');

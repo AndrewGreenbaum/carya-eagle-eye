@@ -7,10 +7,12 @@ export type InvestorRole = 'lead' | 'non_lead' | 'stealth';
 export type InvestmentStage =
   | 'pre_seed'
   | 'seed'
+  | 'seed_plus_series_a'
   | 'series_a'
   | 'series_b'
   | 'series_c'
   | 'series_d'
+  | 'series_e_plus'
   | 'growth'
   | 'exit'
   | 'unknown';
@@ -25,19 +27,12 @@ export type EnterpriseCategory =
   | 'consumer_ai'
   | 'gaming_ai'
   | 'social_ai'
-  // Non-AI (specific categories)
-  | 'crypto'
-  | 'fintech'
-  | 'healthcare'
-  | 'hardware'
-  | 'saas'
-  | 'other'
-  // Legacy (backwards compat)
+  // Non-AI
   | 'not_ai';
 
 export type ScraperType = 'html' | 'rss' | 'playwright' | 'external' | 'dom_diff';
 
-export type ViewType = 'dashboard' | 'stealth' | 'settings' | 'scrapers' | 'tracker' | 'scans' | 'prefunding';
+export type ViewType = 'dashboard' | 'stealth' | 'settings' | 'scrapers' | 'tracker' | 'scans' | 'prefunding' | 'new';
 
 export type ServiceStatus = 'live' | 'idle' | 'error' | 'processing';
 
@@ -413,24 +408,19 @@ export const CATEGORY_LABELS: Record<EnterpriseCategory, string> = {
   consumer_ai: 'Consumer AI',
   gaming_ai: 'Gaming AI',
   social_ai: 'Social AI',
-  // Non-AI (specific categories)
-  crypto: 'Crypto',
-  fintech: 'Fintech',
-  healthcare: 'Healthcare',
-  hardware: 'Hardware',
-  saas: 'SaaS',
-  other: 'Other',
-  // Legacy
-  not_ai: 'Other',
+  // Non-AI
+  not_ai: 'Not AI',
 };
 
 export const STAGE_LABELS: Record<InvestmentStage, string> = {
   pre_seed: 'Pre-Seed',
   seed: 'Seed',
+  seed_plus_series_a: 'Seed/Series A',
   series_a: 'Series A',
   series_b: 'Series B',
   series_c: 'Series C',
   series_d: 'Series D',
+  series_e_plus: 'Series E+',
   growth: 'Growth',
   exit: 'Exit',
   unknown: 'Unknown',

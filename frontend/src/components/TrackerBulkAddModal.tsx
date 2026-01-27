@@ -4,8 +4,8 @@
  * Supports comma-separated and newline-separated company names.
  */
 
-import { useState, useMemo } from 'react';
-import { X, Upload, AlertCircle } from 'lucide-react';
+import { useState, useMemo, useEffect } from 'react';
+import { X } from 'lucide-react';
 
 interface TrackerBulkAddModalProps {
   onClose: () => void;
@@ -20,11 +20,18 @@ export function TrackerBulkAddModal({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
   // Parse input into company names (supports comma and newline separation)
   const parsedNames = useMemo(() => {
     if (!input.trim()) return [];
 
-    // Split by newlines first, then by commas
     const names = input
       .split(/[\n,]+/)
       .map((name) => name.trim())
@@ -61,33 +68,39 @@ export function TrackerBulkAddModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-slate-900 rounded-lg w-full max-w-lg mx-4 shadow-xl">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
-          <div>
-            <h2 className="text-lg font-semibold text-white">Bulk Add Companies</h2>
-            <p className="text-sm text-slate-400 mt-0.5">
-              Add multiple companies to Watching
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="text-slate-400 hover:text-white transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
+    <>
+      {/* Backdrop */}
+      <div
+        className="fixed inset-0 bg-black/75 backdrop-blur-sm z-40"
+        onClick={onClose}
+        aria-hidden="true"
+      />
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          {/* Text Area */}
+      {/* Modal */}
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-[460px] mx-4 bg-[#0a0a0f] border border-zinc-800/25 rounded-2xl shadow-2xl"
+      >
+        <button
+          onClick={onClose}
+          className="absolute top-6 right-7 text-zinc-700 hover:text-zinc-400 transition-colors p-2"
+          aria-label="Close"
+        >
+          <X className="w-4 h-4" />
+        </button>
+
+        <form onSubmit={handleSubmit} className="px-10 sm:px-14 py-12">
+          <h2 className="text-[15px] font-semibold text-zinc-200 tracking-[-0.02em] mb-10">
+            Add Companies
+          </h2>
+
           <div>
             <label
               htmlFor="companies"
-              className="block text-sm font-medium text-slate-300 mb-1.5"
+              className="block text-[10px] uppercase tracking-[0.1em] text-zinc-600 font-medium mb-3"
             >
-              Company Names
+              One per line
             </label>
             <textarea
               id="companies"
@@ -96,70 +109,38 @@ export function TrackerBulkAddModal({
                 setInput(e.target.value);
                 setError(null);
               }}
-              placeholder="Enter company names separated by commas or new lines:
-
-Acme Corp
-TechStartup Inc, AI Solutions
-DataCo"
+              placeholder={"Acme Corp\nTechStartup\nAI Solutions"}
               rows={8}
-              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 resize-none font-mono text-sm"
+              className="w-full bg-transparent border-b border-zinc-800 py-2.5 text-[13px] text-zinc-200 font-mono font-light leading-[1.8] placeholder:text-zinc-800 focus:outline-none focus:border-zinc-600 transition-colors resize-none"
               autoFocus
             />
+            {parsedNames.length > 0 && (
+              <div className="text-[11px] text-zinc-700 mt-3">
+                {parsedNames.length} {parsedNames.length === 1 ? 'company' : 'companies'}
+              </div>
+            )}
           </div>
-
-          {/* Preview */}
-          {parsedNames.length > 0 && (
-            <div className="bg-slate-800/50 rounded-lg p-3">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-slate-300">
-                  Preview ({parsedNames.length} {parsedNames.length === 1 ? 'company' : 'companies'})
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
-                {parsedNames.map((name, i) => (
-                  <span
-                    key={i}
-                    className="px-2 py-0.5 bg-slate-700 text-slate-300 text-xs rounded"
-                  >
-                    {name}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
 
           {/* Error */}
           {error && (
-            <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded text-red-400 text-sm">
-              <AlertCircle className="w-4 h-4 shrink-0" />
+            <div className="text-xs text-red-400 mt-4">
               {error}
             </div>
           )}
 
           {/* Actions */}
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-slate-300 hover:text-white transition-colors"
-              disabled={isSubmitting}
-            >
-              Cancel
-            </button>
+          <div className="flex justify-end mt-12">
             <button
               type="submit"
               disabled={isSubmitting || parsedNames.length === 0}
-              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded font-medium transition-colors"
+              className="text-xs font-medium text-emerald-500 hover:text-emerald-400 disabled:text-zinc-700 transition-colors py-2"
             >
-              <Upload className="w-4 h-4" />
-              {isSubmitting
-                ? 'Adding...'
-                : `Add ${parsedNames.length} ${parsedNames.length === 1 ? 'Company' : 'Companies'}`}
+              {isSubmitting ? 'Adding...' : 'Add'}
             </button>
           </div>
         </form>
       </div>
-    </div>
+    </>
   );
 }
 
