@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     max_retries: int = 3  # Default retry attempts
 
     # Scraping Settings - Rate Limits (seconds)
-    article_rate_limit_delay: float = 0.3  # Delay between article fetches
+    article_rate_limit_delay: float = 0.1  # Delay between article fetches
     feed_rate_limit_delay: float = 0.2  # Delay between feed fetches
     api_rate_limit_delay: float = 0.5  # Delay for API-heavy operations
 
@@ -120,10 +120,9 @@ class Settings(BaseSettings):
     batch_size: int = 50
 
     # Per-Request Timeout: Prevents single-request hangs from blocking the pipeline
-    # Why 45s? Long enough for slow but legitimate requests (large articles),
-    # short enough to fail fast when external services are degraded.
-    # Compare: Brave overall timeout was 120s, SEC was 180s - those are too coarse.
-    per_request_timeout: float = 45.0
+    # Why 20s? Most articles fetch in 2-5s. Anything >20s is likely unresponsive.
+    # Fail fast and move on rather than waiting 45s for slow servers.
+    per_request_timeout: float = 20.0
 
     # Circuit Breaker: Disables sources that are consistently failing
     # Why 5? Enough to distinguish transient errors (1-2) from systemic failures (5+).
