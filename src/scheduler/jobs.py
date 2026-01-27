@@ -1929,7 +1929,7 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
                         include_partner_names=True,  # Critical for Benchmark, Khosla, First Round
                     )
 
-            articles = await asyncio.wait_for(_scrape_brave(), timeout=120.0)
+            articles = await asyncio.wait_for(_scrape_brave(), timeout=180.0)
 
             # Skip title filter - Brave queries are already targeted at funding news
             stats = await process_external_articles(articles, "brave_search", scan_job_id, skip_title_filter=True)
@@ -1938,8 +1938,8 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             _circuit_breaker.record_success("brave_search")
 
         except asyncio.TimeoutError:
-            logger.error("SCRAPER_TIMEOUT: brave_search timed out after 120s")
-            results["brave_search"] = {"error": "timeout after 120s", "articles_found": 0}
+            logger.error("SCRAPER_TIMEOUT: brave_search timed out after 180s")
+            results["brave_search"] = {"error": "timeout after 180s", "articles_found": 0}
             _circuit_breaker.record_error("brave_search")
         except Exception as e:
             logger.error("Brave Search scraping failed: %s", e)
