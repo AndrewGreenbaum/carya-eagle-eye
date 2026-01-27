@@ -856,6 +856,7 @@ _last_job_run: Optional[datetime] = None
 _last_job_status: Optional[str] = None
 _last_job_error: Optional[str] = None
 _last_job_duration: Optional[float] = None
+_current_scan_job_id: Optional[int] = None  # Track current scan for timeout handler
 
 
 async def process_external_articles(
@@ -1981,15 +1982,38 @@ async def scheduled_scrape_job(trigger: str = "scheduled"):
             f"{JOB_TIMEOUT_SECONDS // 60} minutes - job killed"
         )
         # Update global tracking for observability
-        global _last_job_status, _last_job_error, _last_job_duration
+        global _last_job_status, _last_job_error, _last_job_duration, _current_scan_job_id
         _last_job_status = "timeout"
         _last_job_error = f"Job timed out after {JOB_TIMEOUT_SECONDS} seconds"
         _last_job_duration = JOB_TIMEOUT_SECONDS
 
+        # FIX: Update database to mark scan as failed (was missing, caused stuck scans)
+        if _current_scan_job_id:
+            try:
+                from ..archivist.database import get_session
+                from ..archivist.models import ScanJob
+                from sqlalchemy import select
+
+                async with get_session() as session:
+                    result = await session.execute(
+                        select(ScanJob).where(ScanJob.id == _current_scan_job_id)
+                    )
+                    scan_job = result.scalar_one_or_none()
+                    if scan_job and scan_job.status == "running":
+                        scan_job.status = "failed"
+                        scan_job.error_message = f"Job timed out after {JOB_TIMEOUT_SECONDS} seconds"
+                        scan_job.completed_at = datetime.now(timezone.utc)
+                        await session.commit()
+                        logger.info(f"Marked timed-out scan {_current_scan_job_id} as failed")
+            except Exception as e:
+                logger.error(f"Failed to update timed-out scan status: {e}")
+            finally:
+                _current_scan_job_id = None
+
 
 async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
     """Internal implementation of scheduled_scrape_job (separated for timeout wrapper)."""
-    global _last_job_run, _last_job_status, _last_job_error, _last_job_duration
+    global _last_job_run, _last_job_status, _last_job_error, _last_job_duration, _current_scan_job_id
 
     job_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     logger.info(f"[{job_id}] Starting scheduled scrape job (trigger={trigger})")
@@ -2016,6 +2040,8 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
             await session.commit()
             await session.refresh(scan_job)
             scan_job_db_id = scan_job.id
+            # Track in global for timeout handler access
+            _current_scan_job_id = scan_job_db_id
             logger.info(f"[{job_id}] Created ScanJob record (id={scan_job_db_id})")
     except Exception as e:
         logger.warning(f"[{job_id}] Failed to create ScanJob record: {e}")
@@ -2189,6 +2215,9 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
                     await flush_token_usage_batch(force=True)
             except Exception as e:
                 logger.warning(f"[{job_id}] Failed to update ScanJob record: {e}")
+            finally:
+                # Clear global scan ID tracker
+                _current_scan_job_id = None
 
     except Exception as e:
         logger.error(f"[{job_id}] Scrape job failed: {e}", exc_info=True)
@@ -2219,6 +2248,9 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
                     await flush_token_usage_batch(force=True)
             except Exception as update_err:
                 logger.warning(f"[{job_id}] Failed to update ScanJob failure: {update_err}")
+            finally:
+                # Clear global scan ID tracker
+                _current_scan_job_id = None
 
         # Still try to send error notification
         await send_scrape_summary(
