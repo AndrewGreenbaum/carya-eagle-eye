@@ -135,7 +135,7 @@ Article → Source Filter → Title Filter → Content Dedup → Keyword Filter 
 
 **2026-01 Fixes (batch 2):**
 - TIER 4: Requires 60% prefix overlap (not just 3 chars) to prevent "MEQ Probe" vs "MEQ Consulting" false matches
-- TIER 2.5: Amount sanity check - blocks matches with >5x amount ratio UNLESS larger amount ≥$500M (valuation confusion)
+- TIER 2.5: Amount sanity check - blocks matches with >5x amount ratio (stricter valuation exception in batch 4)
 - TIER 2.5: Null-date handling - checks recent deals (30 days by created_at) when incoming date is null
 - TIER 1: SQL-level round_type filter to avoid LIMIT 200 missing duplicates
 - TIER 1: Tighter date window (60 days) when one/both amounts are missing
@@ -151,6 +151,17 @@ Article → Source Filter → Title Filter → Content Dedup → Keyword Filter 
 - **Amount precision:** `format_sec_amount()` uses Decimal for exact representation
 - **Parallel alerts:** Alert sending uses `asyncio.gather` instead of serial loop
 - **GoogleNews cleanup warning:** `__del__` warns if HTTP clients not properly closed
+
+**2026-01 Fixes (batch 4 - scrapers & extraction):**
+- **EXTERNAL_ONLY_FUNDS centralized:** `brave_search.py` now imports from `config.funds` (was hardcoded, missing "redpoint")
+- **Keyword filtering word boundary:** `base_scraper.py` uses regex word boundary (prevents "Benchmark International" matching "benchmark")
+- **Partner context passing:** `_verify_tracked_fund()` passes article_text to `match_fund_name()` for partner→fund attribution
+- **TIER 2.5 stricter amount check:** Valuation exception now requires 8-12x ratio + both amounts ≥$50M (was just >$500M)
+- **URL exclusion in investor matching:** `_investor_in_text()` excludes URL patterns (prevents "GV" matching "gv.com")
+- **GoogleNews client race fix:** Removed lazy property, client now initialized only in `__aenter__` context manager
+- **Brave error counting:** Exception logging now includes count for health monitoring
+- **SEC date fallback:** `_parse_feed_entry()` tries `published` field and URL-derived year before skipping
+- **Funding keywords expanded:** Added "led", "invests" to strong keywords (fixes "has led a $40M" pattern)
 
 **Two dedup keys:**
 - `dedup_key = MD5(name|round|date_bucket)` - exact match

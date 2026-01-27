@@ -1752,6 +1752,85 @@ async def extract_funding_deals_batch(
         clear_extraction_context()
 
 
+# ----- Scan Job Helpers for API Triggers -----
+
+
+async def create_scan_job(trigger: str = "api") -> tuple[int, str]:
+    """Create a ScanJob record for API-triggered scans.
+
+    Returns:
+        Tuple of (scan_job_db_id, job_id string)
+    """
+    from .archivist.models import ScanJob
+
+    job_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    async with get_session() as session:
+        scan_job = ScanJob(
+            job_id=job_id,
+            status="running",
+            trigger=trigger,
+        )
+        session.add(scan_job)
+        await session.commit()
+        await session.refresh(scan_job)
+        logger.info(f"[{job_id}] Created ScanJob record (id={scan_job.id}, trigger={trigger})")
+        return scan_job.id, job_id
+
+
+async def update_scan_job(
+    scan_job_id: int,
+    status: str,
+    stats: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
+    start_time: Optional[datetime] = None,
+) -> None:
+    """Update ScanJob with final stats.
+
+    Args:
+        scan_job_id: Database ID of the ScanJob
+        status: Final status (success, failed)
+        stats: Optional dict with keys like articles_found, deals_saved, etc.
+        error: Optional error message if status is failed
+        start_time: Optional start time to calculate duration
+    """
+    from .archivist.models import ScanJob
+
+    try:
+        async with get_session() as session:
+            scan_job = await session.get(ScanJob, scan_job_id)
+            if not scan_job:
+                logger.warning(f"ScanJob {scan_job_id} not found for update")
+                return
+
+            scan_job.status = status
+            scan_job.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+            if start_time:
+                duration = (datetime.now(timezone.utc) - start_time.replace(tzinfo=timezone.utc)).total_seconds()
+                scan_job.duration_seconds = duration
+
+            if stats:
+                scan_job.total_articles_found = stats.get("articles_found", 0)
+                scan_job.total_deals_extracted = stats.get("deals_extracted", 0)
+                scan_job.total_deals_saved = stats.get("deals_saved", 0)
+                scan_job.total_duplicates_skipped = stats.get("articles_skipped_duplicate", 0)
+                scan_job.total_errors = stats.get("errors", 0)
+                scan_job.lead_deals_found = stats.get("lead_deals", 0)
+                scan_job.enterprise_ai_deals_found = stats.get("enterprise_ai_deals", 0)
+
+                # Store source-specific results as JSON
+                if "source_results" in stats:
+                    scan_job.source_results_json = json.dumps(stats["source_results"], default=str)
+
+            if error:
+                scan_job.error_message = error
+
+            await session.commit()
+            logger.info(f"Updated ScanJob {scan_job_id}: status={status}")
+    except Exception as e:
+        logger.warning(f"Failed to update ScanJob {scan_job_id}: {e}")
+
+
 # ----- Scraping Endpoints -----
 
 class ScraperStatusResponse(BaseModel):
@@ -1813,24 +1892,51 @@ async def run_scraper(
             detail=f"Scraper not implemented for '{fund_slug}'"
         )
 
+    # Create ScanJob record for tracking
+    scan_job_id, job_id = await create_scan_job(trigger="api")
+    start_time = datetime.now(timezone.utc)
+
     # FIX: Clear content hash cache before scraping to prevent false duplicates
     clear_content_hash_cache()
 
     # FIX #39: Invalidate cache BEFORE scraping to prevent stale data during operation
     cache.invalidate("deals")
 
-    result = await scrape_fund(fund_slug)
+    try:
+        result = await scrape_fund(fund_slug, scan_job_id=scan_job_id)
 
-    return ScrapeResponse(
-        fund_slug=result.fund_slug,
-        articles_found=result.articles_found,
-        articles_skipped_duplicate=result.articles_skipped_duplicate,
-        articles_rejected_not_announcement=result.articles_rejected_not_announcement,
-        deals_extracted=result.deals_extracted,
-        deals_saved=result.deals_saved,
-        errors=result.errors,
-        duration_seconds=result.duration_seconds,
-    )
+        # Update ScanJob with success stats
+        await update_scan_job(
+            scan_job_id,
+            status="success",
+            stats={
+                "articles_found": result.articles_found,
+                "deals_extracted": result.deals_extracted,
+                "deals_saved": result.deals_saved,
+                "articles_skipped_duplicate": result.articles_skipped_duplicate,
+                "errors": len(result.errors),
+                "source_results": {fund_slug: {
+                    "articles_found": result.articles_found,
+                    "deals_extracted": result.deals_extracted,
+                    "deals_saved": result.deals_saved,
+                }},
+            },
+            start_time=start_time,
+        )
+
+        return ScrapeResponse(
+            fund_slug=result.fund_slug,
+            articles_found=result.articles_found,
+            articles_skipped_duplicate=result.articles_skipped_duplicate,
+            articles_rejected_not_announcement=result.articles_rejected_not_announcement,
+            deals_extracted=result.deals_extracted,
+            deals_saved=result.deals_saved,
+            errors=result.errors,
+            duration_seconds=result.duration_seconds,
+        )
+    except Exception as e:
+        await update_scan_job(scan_job_id, status="failed", error=str(e), start_time=start_time)
+        raise
 
 
 @app.post("/scrapers/run", response_model=List[ScrapeResponse])
@@ -1855,28 +1961,71 @@ async def run_scrapers_batch(
                 detail=f"Scraper not implemented for '{slug}'"
             )
 
-    results = await scrape_all_funds(
-        fund_slugs=request.fund_slugs,
-        parallel=request.parallel,
-        max_parallel_funds=3
-    )
+    # Create ScanJob record for tracking
+    scan_job_id, job_id = await create_scan_job(trigger="api")
+    start_time = datetime.now(timezone.utc)
 
-    # Invalidate deals cache after scraping
-    cache.invalidate("deals")
-
-    return [
-        ScrapeResponse(
-            fund_slug=r.fund_slug,
-            articles_found=r.articles_found,
-            articles_skipped_duplicate=r.articles_skipped_duplicate,
-            articles_rejected_not_announcement=r.articles_rejected_not_announcement,
-            deals_extracted=r.deals_extracted,
-            deals_saved=r.deals_saved,
-            errors=r.errors,
-            duration_seconds=r.duration_seconds,
+    try:
+        results = await scrape_all_funds(
+            fund_slugs=request.fund_slugs,
+            parallel=request.parallel,
+            max_parallel_funds=3,
+            scan_job_id=scan_job_id,
         )
-        for r in results
-    ]
+
+        # Invalidate deals cache after scraping
+        cache.invalidate("deals")
+
+        # Build source results for ScanJob
+        source_results = {}
+        total_articles = 0
+        total_extracted = 0
+        total_saved = 0
+        total_duplicates = 0
+        total_errors = 0
+
+        for r in results:
+            source_results[r.fund_slug] = {
+                "articles_found": r.articles_found,
+                "deals_extracted": r.deals_extracted,
+                "deals_saved": r.deals_saved,
+            }
+            total_articles += r.articles_found
+            total_extracted += r.deals_extracted
+            total_saved += r.deals_saved
+            total_duplicates += r.articles_skipped_duplicate
+            total_errors += len(r.errors)
+
+        await update_scan_job(
+            scan_job_id,
+            status="success",
+            stats={
+                "articles_found": total_articles,
+                "deals_extracted": total_extracted,
+                "deals_saved": total_saved,
+                "articles_skipped_duplicate": total_duplicates,
+                "errors": total_errors,
+                "source_results": source_results,
+            },
+            start_time=start_time,
+        )
+
+        return [
+            ScrapeResponse(
+                fund_slug=r.fund_slug,
+                articles_found=r.articles_found,
+                articles_skipped_duplicate=r.articles_skipped_duplicate,
+                articles_rejected_not_announcement=r.articles_rejected_not_announcement,
+                deals_extracted=r.deals_extracted,
+                deals_saved=r.deals_saved,
+                errors=r.errors,
+                duration_seconds=r.duration_seconds,
+            )
+            for r in results
+        ]
+    except Exception as e:
+        await update_scan_job(scan_job_id, status="failed", error=str(e), start_time=start_time)
+        raise
 
 
 # ----- Run All Scrapers -----
@@ -1892,29 +2041,72 @@ async def run_all_scrapers(
     This endpoint can be called by external cron services or manually.
     Scrapes all 18 VC funds with parallel execution.
     """
+    # Create ScanJob record for tracking
+    scan_job_id, job_id = await create_scan_job(trigger="api")
+    start_time = datetime.now(timezone.utc)
+
     fund_slugs = get_implemented_scrapers()
 
-    results = await scrape_all_funds(
-        fund_slugs=fund_slugs,
-        parallel=parallel,
-        max_parallel_funds=3
-    )
-
-    cache.invalidate("deals")
-
-    return [
-        ScrapeResponse(
-            fund_slug=r.fund_slug,
-            articles_found=r.articles_found,
-            articles_skipped_duplicate=r.articles_skipped_duplicate,
-            articles_rejected_not_announcement=r.articles_rejected_not_announcement,
-            deals_extracted=r.deals_extracted,
-            deals_saved=r.deals_saved,
-            errors=r.errors,
-            duration_seconds=r.duration_seconds,
+    try:
+        results = await scrape_all_funds(
+            fund_slugs=fund_slugs,
+            parallel=parallel,
+            max_parallel_funds=3,
+            scan_job_id=scan_job_id,
         )
-        for r in results
-    ]
+
+        cache.invalidate("deals")
+
+        # Build source results for ScanJob
+        source_results = {}
+        total_articles = 0
+        total_extracted = 0
+        total_saved = 0
+        total_duplicates = 0
+        total_errors = 0
+
+        for r in results:
+            source_results[r.fund_slug] = {
+                "articles_found": r.articles_found,
+                "deals_extracted": r.deals_extracted,
+                "deals_saved": r.deals_saved,
+            }
+            total_articles += r.articles_found
+            total_extracted += r.deals_extracted
+            total_saved += r.deals_saved
+            total_duplicates += r.articles_skipped_duplicate
+            total_errors += len(r.errors)
+
+        await update_scan_job(
+            scan_job_id,
+            status="success",
+            stats={
+                "articles_found": total_articles,
+                "deals_extracted": total_extracted,
+                "deals_saved": total_saved,
+                "articles_skipped_duplicate": total_duplicates,
+                "errors": total_errors,
+                "source_results": source_results,
+            },
+            start_time=start_time,
+        )
+
+        return [
+            ScrapeResponse(
+                fund_slug=r.fund_slug,
+                articles_found=r.articles_found,
+                articles_skipped_duplicate=r.articles_skipped_duplicate,
+                articles_rejected_not_announcement=r.articles_rejected_not_announcement,
+                deals_extracted=r.deals_extracted,
+                deals_saved=r.deals_saved,
+                errors=r.errors,
+                duration_seconds=r.duration_seconds,
+            )
+            for r in results
+        ]
+    except Exception as e:
+        await update_scan_job(scan_job_id, status="failed", error=str(e), start_time=start_time)
+        raise
 
 
 # ----- Data Source Endpoints -----
@@ -1940,6 +2132,10 @@ async def run_sec_edgar_scraper(
     """
     from .harvester.scrapers.sec_edgar import SECEdgarScraper
     from .scheduler.jobs import process_external_articles
+
+    # Create ScanJob record for tracking
+    scan_job_id, job_id = await create_scan_job(trigger="api")
+    start_time = datetime.now(timezone.utc)
 
     try:
         async with SECEdgarScraper() as scraper:
@@ -1969,8 +2165,27 @@ async def run_sec_edgar_scraper(
                 articles.append(article)
 
         # Save articles to database (was missing - articles were discarded)
-        stats = await process_external_articles(articles, "sec_edgar")
+        stats = await process_external_articles(articles, "sec_edgar", scan_job_id=scan_job_id)
         cache.invalidate("deals")
+
+        # Update ScanJob with success stats
+        await update_scan_job(
+            scan_job_id,
+            status="success",
+            stats={
+                "articles_found": len(articles),
+                "deals_extracted": stats.get("deals_extracted", 0),
+                "deals_saved": stats.get("deals_saved", 0),
+                "errors": 0,
+                "source_results": {"sec_edgar": {
+                    "filings_found": len(filings),
+                    "filings_with_tracked_funds": tracked_count,
+                    "articles_generated": len(articles),
+                    "deals_saved": stats.get("deals_saved", 0),
+                }},
+            },
+            start_time=start_time,
+        )
 
         return SECEdgarResponse(
             filings_found=len(filings),
@@ -1980,6 +2195,7 @@ async def run_sec_edgar_scraper(
         )
 
     except Exception as e:
+        await update_scan_job(scan_job_id, status="failed", error=str(e), start_time=start_time)
         logger.error("Request failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -2382,14 +2598,36 @@ async def run_google_news_scraper_endpoint(
     from .harvester.scrapers.google_news_rss import GoogleNewsRSSScraper, GOOGLE_NEWS_FUNDS
     from .scheduler.jobs import process_external_articles
 
+    # Create ScanJob record for tracking
+    scan_job_id, job_id = await create_scan_job(trigger="api")
+    start_time = datetime.now(timezone.utc)
+
     try:
         async with GoogleNewsRSSScraper() as scraper:
             articles = await scraper.scrape_all(days_back=days_back)
 
         # Process through extraction pipeline
-        stats = await process_external_articles(articles, "google_news", skip_title_filter=True)
+        stats = await process_external_articles(articles, "google_news", skip_title_filter=True, scan_job_id=scan_job_id)
 
         cache.invalidate("deals")
+
+        # Update ScanJob with success stats
+        await update_scan_job(
+            scan_job_id,
+            status="success",
+            stats={
+                "articles_found": len(articles),
+                "deals_extracted": stats.get("deals_extracted", 0),
+                "deals_saved": stats.get("deals_saved", 0),
+                "errors": stats.get("errors", 0),
+                "source_results": {"google_news": {
+                    "articles_found": len(articles),
+                    "fund_matches": len([a for a in articles if a.fund_slug]),
+                    "deals_saved": stats.get("deals_saved", 0),
+                }},
+            },
+            start_time=start_time,
+        )
 
         return GoogleNewsResponse(
             articles_found=len(articles),
@@ -2398,6 +2636,7 @@ async def run_google_news_scraper_endpoint(
         )
 
     except Exception as e:
+        await update_scan_job(scan_job_id, status="failed", error=str(e), start_time=start_time)
         logger.error("Request failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -3316,6 +3555,16 @@ async def run_all_sources(
     from .harvester.scrapers.google_alerts import GoogleAlertsScraper
     from .harvester.scrapers.twitter_monitor import TwitterMonitor
 
+    # Create ScanJob record for tracking
+    scan_job_id, job_id = await create_scan_job(trigger="api")
+    start_time = datetime.now(timezone.utc)
+
+    # Track aggregate stats for ScanJob
+    total_articles = 0
+    total_deals_extracted = 0
+    total_deals_saved = 0
+    total_errors = 0
+
     results = {}
 
     # SEC EDGAR (always runs - free)
@@ -3350,7 +3599,11 @@ async def run_all_sources(
             # Process articles through extraction pipeline
             # FIX: Was just counting articles, not actually extracting deals!
             # Skip title filter - Brave queries are already targeted at funding news
-            stats = await process_external_articles(articles, "brave_search", skip_title_filter=True)
+            stats = await process_external_articles(articles, "brave_search", skip_title_filter=True, scan_job_id=scan_job_id)
+
+            total_articles += len(articles)
+            total_deals_extracted += stats.get("deals_extracted", 0)
+            total_deals_saved += stats.get("deals_saved", 0)
 
             results["brave_search"] = BraveSearchResponse(
                 queries_executed=20,  # Was 38, now 20 after participation disabled
@@ -3361,6 +3614,7 @@ async def run_all_sources(
             )
         except Exception as e:
             logger.error(f"Brave Search error: {e}")
+            total_errors += 1
             results["brave_search"] = None
     else:
         results["brave_search"] = None
@@ -3374,7 +3628,7 @@ async def run_all_sources(
                 articles = await scraper.scrape_all()
 
             # Process articles through extraction pipeline
-            stats = await process_external_articles(articles, "google_alerts")
+            stats = await process_external_articles(articles, "google_alerts", scan_job_id=scan_job_id)
 
             results["google_alerts"] = GoogleAlertsResponse(
                 feeds_configured=len(feed_urls),
@@ -3606,7 +3860,10 @@ async def run_all_sources(
         async with GoogleNewsRSSScraper() as scraper:
             articles = await scraper.scrape_all(days_back=days)
         # Process through extraction pipeline
-        stats = await process_external_articles(articles, "google_news", skip_title_filter=True)
+        stats = await process_external_articles(articles, "google_news", skip_title_filter=True, scan_job_id=scan_job_id)
+        total_articles += len(articles)
+        total_deals_extracted += stats.get("deals_extracted", 0)
+        total_deals_saved += stats.get("deals_saved", 0)
         results["google_news"] = GoogleNewsResponse(
             articles_found=len(articles),
             fund_matches=len([a for a in articles if a.fund_slug]),
@@ -3614,6 +3871,7 @@ async def run_all_sources(
         )
     except Exception as e:
         logger.warning(f"Google News RSS error: {e}")
+        total_errors += 1
         results["google_news"] = None
 
     # ----- Tier 1 Stealth Detection -----
@@ -3673,6 +3931,20 @@ async def run_all_sources(
         results["delaware_corps"] = None
 
     cache.invalidate("deals")
+
+    # Update ScanJob with final stats
+    await update_scan_job(
+        scan_job_id,
+        status="success",
+        stats={
+            "articles_found": total_articles,
+            "deals_extracted": total_deals_extracted,
+            "deals_saved": total_deals_saved,
+            "errors": total_errors,
+            "source_results": {k: v.model_dump() if v else None for k, v in results.items()},
+        },
+        start_time=start_time,
+    )
 
     return AllSourcesResponse(**results)
 

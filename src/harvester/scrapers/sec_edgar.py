@@ -227,14 +227,46 @@ class SECEdgarScraper:
 
             form_type, company_name, cik = match.groups()
 
-            # Extract filing date
+            # Extract filing date - try multiple sources
+            # FIX (2026-01): Try alternate date sources before giving up
+            filing_date = None
+
+            # Source 1: 'updated' field (primary)
             updated = entry.get("updated", "")
-            try:
-                filing_date = datetime.fromisoformat(updated.replace("Z", "+00:00")).date()
-            except (ValueError, TypeError):
-                # FIX: Skip filings with unparsable dates instead of defaulting to today
-                # (which would incorrectly mark old filings as new)
-                logger.warning(f"SEC EDGAR: Unparsable date '{updated}' for {company_name} - skipping")
+            if updated:
+                try:
+                    filing_date = datetime.fromisoformat(updated.replace("Z", "+00:00")).date()
+                except (ValueError, TypeError):
+                    pass
+
+            # Source 2: 'published' field (alternate)
+            if filing_date is None:
+                published = entry.get("published", "")
+                if published:
+                    try:
+                        filing_date = datetime.fromisoformat(published.replace("Z", "+00:00")).date()
+                    except (ValueError, TypeError):
+                        pass
+
+            # Source 3: Extract date from URL (format: /Archives/edgar/data/CIK/NNNNNNNNNN-NN-NNNNNN/)
+            # The accession number format is NNNNNNNNNN-YY-NNNNNN where YY is 2-digit year
+            if filing_date is None:
+                filing_url = entry.get("link", "")
+                date_in_url_match = re.search(r'/(\d{10})-(\d{2})-\d{6}/', filing_url)
+                if date_in_url_match:
+                    # Extract year from accession number (2-digit year)
+                    try:
+                        two_digit_year = int(date_in_url_match.group(2))
+                        # Assume 20xx for years 00-50, 19xx for 51-99
+                        full_year = 2000 + two_digit_year if two_digit_year <= 50 else 1900 + two_digit_year
+                        # Use Jan 1 of that year as approximate date
+                        filing_date = date(full_year, 1, 1)
+                        logger.debug(f"SEC EDGAR: Using URL-derived year {full_year} for {company_name}")
+                    except (ValueError, TypeError):
+                        pass
+
+            if filing_date is None:
+                logger.warning(f"SEC EDGAR: No parsable date for {company_name} (tried: updated='{updated}') - skipping")
                 return None
 
             # Extract filing URL

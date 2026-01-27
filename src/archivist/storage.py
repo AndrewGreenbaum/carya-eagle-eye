@@ -1060,15 +1060,24 @@ async def find_duplicate_deal(
 
         for deal, company in tier25_candidates:
             if company_names_match(company_name, company.name):
-                # FIX: Add amount sanity check - if both have amounts, they should be within 5x
-                # This prevents matching a $5M Series A with a $50M Series A extension
-                # EXCEPTION: Allow valuation confusion (if larger amount >= $500M, likely valuation vs funding)
+                # FIX (2026-01): Stricter amount sanity check for TIER 2.5
+                # Prevents $100M Series B being merged with $500M valuation as same deal
+                # Valuation confusion exception now requires:
+                # 1. Ratio must be ~10x (classic funding/valuation pattern)
+                # 2. BOTH amounts must be >= $50M (typical for valuation mentions)
                 if normalized_amount and deal.amount_usd:
                     larger_amount = max(normalized_amount, deal.amount_usd)
                     smaller_amount = min(normalized_amount, deal.amount_usd)
                     ratio = larger_amount / max(1, smaller_amount)
-                    # Skip if ratio > 5x AND larger amount < $500M (unlikely to be valuation confusion)
-                    if ratio > 5 and larger_amount < 500_000_000:
+                    # Skip match if ratio > 5x, UNLESS it's the classic valuation pattern:
+                    # - Ratio is 8-12x (funding vs valuation is typically 10x)
+                    # - Both amounts are significant ($50M+ each)
+                    is_valuation_pattern = (
+                        8.0 <= ratio <= 12.0 and
+                        smaller_amount >= 50_000_000 and
+                        larger_amount >= 400_000_000
+                    )
+                    if ratio > 5 and not is_valuation_pattern:
                         logger.debug(
                             f"TIER 2.5 skip: '{company_name}' amount ratio {ratio:.1f}x too high "
                             f"(incoming={normalized_amount}, existing={deal.amount_usd})"
@@ -1097,12 +1106,17 @@ async def find_duplicate_deal(
 
         for deal, company in tier25_null_candidates:
             if company_names_match(company_name, company.name):
-                # Apply same amount sanity check (with valuation confusion exception)
+                # FIX (2026-01): Apply same stricter amount sanity check
                 if normalized_amount and deal.amount_usd:
                     larger_amount = max(normalized_amount, deal.amount_usd)
                     smaller_amount = min(normalized_amount, deal.amount_usd)
                     ratio = larger_amount / max(1, smaller_amount)
-                    if ratio > 5 and larger_amount < 500_000_000:
+                    is_valuation_pattern = (
+                        8.0 <= ratio <= 12.0 and
+                        smaller_amount >= 50_000_000 and
+                        larger_amount >= 400_000_000
+                    )
+                    if ratio > 5 and not is_valuation_pattern:
                         logger.debug(
                             f"TIER 2.5 null-date skip: '{company_name}' amount ratio {ratio:.1f}x too high"
                         )
@@ -1133,12 +1147,17 @@ async def find_duplicate_deal(
 
         for deal, company in tier25_reverse_candidates:
             if company_names_match(company_name, company.name):
-                # Apply amount sanity check (same as TIER 2.5)
+                # FIX (2026-01): Apply same stricter amount sanity check
                 if normalized_amount and deal.amount_usd:
                     larger_amount = max(normalized_amount, deal.amount_usd)
                     smaller_amount = min(normalized_amount, deal.amount_usd)
                     ratio = larger_amount / max(1, smaller_amount)
-                    if ratio > 5 and larger_amount < 500_000_000:
+                    is_valuation_pattern = (
+                        8.0 <= ratio <= 12.0 and
+                        smaller_amount >= 50_000_000 and
+                        larger_amount >= 400_000_000
+                    )
+                    if ratio > 5 and not is_valuation_pattern:
                         logger.debug(
                             f"TIER 2.5 reverse skip: '{company_name}' amount ratio {ratio:.1f}x too high"
                         )

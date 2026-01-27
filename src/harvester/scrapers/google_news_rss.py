@@ -435,29 +435,27 @@ class GoogleNewsRSSScraper:
 
     @property
     def client(self) -> httpx.AsyncClient:
-        """Get the HTTP client, creating it lazily if needed.
+        """Get the HTTP client, raising error if not initialized.
 
-        FIX 2026-01: Added lock to prevent TOCTOU race condition where multiple
-        concurrent calls to this property could create multiple clients, causing
-        memory leaks and socket exhaustion.
+        FIX (2026-01): Removed lazy initialization to eliminate race condition.
+        The client MUST be initialized via __aenter__ (async context manager).
+        This ensures proper lifecycle management and prevents memory leaks.
 
-        Note: This is still a sync property. The lock acquisition happens on first
-        access in a given event loop context. For truly concurrent-safe async code,
-        prefer using __aenter__ context manager.
+        Raises:
+            RuntimeError: If scraper is used without context manager
         """
-        # Fast path: client exists and is open
-        if self._client is not None and not self._client.is_closed:
-            return self._client
-        # Slow path: need to create client (only happens once per instance)
-        # Note: This isn't truly thread-safe but is safe for single-threaded asyncio
-        # For full safety, always use the async context manager
-        self._client = self._create_client()
+        if self._client is None or self._client.is_closed:
+            raise RuntimeError(
+                "GoogleNewsRSSScraper must be used as async context manager: "
+                "'async with GoogleNewsRSSScraper() as scraper:'"
+            )
         return self._client
 
     async def __aenter__(self):
         self._entered = True
-        # Ensure main client is created
-        _ = self.client
+        # FIX (2026-01): Create client here instead of lazy property to prevent race condition
+        if self._client is None or self._client.is_closed:
+            self._client = self._create_client()
         # Create article client
         self._article_client = httpx.AsyncClient(
             timeout=ARTICLE_FETCH_TIMEOUT,
