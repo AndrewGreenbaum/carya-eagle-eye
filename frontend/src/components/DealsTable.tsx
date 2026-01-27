@@ -28,6 +28,7 @@ interface DealsTableProps {
   onSortChange: (direction: SortDirection) => void;
   showRejected?: boolean;
   modalOpen?: boolean;
+  nextScrape?: string;
 }
 
 export function DealsTable({
@@ -42,11 +43,47 @@ export function DealsTable({
   onSortChange: _onSortChange,
   showRejected = false,
   modalOpen = false,
+  nextScrape,
 }: DealsTableProps) {
   void _onExport;
   void _onRefresh;
   void _sortDirection;
   void _onSortChange;
+
+  // Countdown timer state
+  const [countdown, setCountdown] = useState<string>('');
+
+  // Update countdown every second
+  useEffect(() => {
+    if (!nextScrape) return;
+
+    const updateCountdown = () => {
+      const now = new Date().getTime();
+      const target = new Date(nextScrape).getTime();
+      const diff = target - now;
+
+      if (diff <= 0) {
+        setCountdown('scanning...');
+        return;
+      }
+
+      const hours = Math.floor(diff / (1000 * 60 * 60));
+      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+
+      if (hours > 0) {
+        setCountdown(`${hours}h ${minutes}m`);
+      } else if (minutes > 0) {
+        setCountdown(`${minutes}m ${seconds}s`);
+      } else {
+        setCountdown(`${seconds}s`);
+      }
+    };
+
+    updateCountdown();
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
+  }, [nextScrape]);
 
   const [selectedIndex, setSelectedIndex] = useState<number>(-1);
   const [toast, setToast] = useState<string | null>(null);
@@ -236,6 +273,12 @@ export function DealsTable({
             <span className="text-sm font-medium text-slate-300 tracking-wide">DEALS</span>
             <span className="text-sm text-slate-500">({pagination.total})</span>
           </div>
+          {countdown && (
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <span>next scan</span>
+              <span className="text-slate-400 font-medium tabular-nums">{countdown}</span>
+            </div>
+          )}
         </div>
 
         {/* Column Headers */}

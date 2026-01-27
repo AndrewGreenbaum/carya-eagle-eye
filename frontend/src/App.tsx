@@ -524,6 +524,7 @@ function App() {
                     onSortChange={handleSortChange}
                     showRejected={filters.showRejected}
                     modalOpen={!!selectedDeal}
+                    nextScrape={systemStatus.nextScrape}
                   />
                 </ErrorBoundary>
               </div>
