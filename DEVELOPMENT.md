@@ -209,6 +209,12 @@ new Date(y, m-1, d);
 
 **Filters:** AI master toggle → Enterprise AI sub-toggle → defaults both ON + Lead ON
 
+**"New" tab:** Shows deals from most recent successful scan
+- Fetches `GET /scans?page=1&limit=5`, finds first with `status=success && total_deals_saved > 0`
+- Fetches deals via `GET /scans/{scanId}`
+- "Unseen" tracking is client-side only (localStorage: `carya-seen-deals`)
+- If empty: check `/scans` - likely all recent scans failed
+
 ## Development
 
 **IMPORTANT: Always use the Python 3.11 virtual environment for all Python commands:**
@@ -298,6 +304,8 @@ create_scraper_client(user_agent, timeout, ...)
 | Brave 422 | Query too long |
 | Dates off by 1 | Use date component parsing |
 | Content hash table missing | Run `alembic upgrade head` (migration: `20260121_content_hashes`) |
+| New tab empty | Check `GET /scans?limit=5` - scans may be failing. Trigger manual: `POST /scheduler/trigger` |
+| Scans stuck/timeout | Check Railway logs for Claude API errors, DB pool exhaustion, or memory issues |
 
 ## Critical Rules
 1. **GV:** NEVER confuse with NYSE:GV stock ticker

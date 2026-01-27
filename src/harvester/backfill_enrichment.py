@@ -603,52 +603,55 @@ async def backfill_all(
 
 
 async def get_enrichment_coverage() -> Dict:
-    """Get current enrichment coverage statistics."""
+    """Get current enrichment coverage statistics.
+
+    FIX (2026-01): Added with_both and missing_both metrics for better coverage tracking.
+    """
     async with get_session() as session:
-        # Total deals
+        # Total deals with company
         total_stmt = select(Deal.id).join(PortfolioCompany)
         total_result = await session.execute(total_stmt)
         total_deals = len(total_result.fetchall())
 
-        # Deals with website
-        website_stmt = (
-            select(Deal.id)
+        # Get all deals with company info for comprehensive analysis
+        all_deals_stmt = (
+            select(Deal.id, Deal.founders_json, PortfolioCompany.website)
             .join(PortfolioCompany)
-            .where(
-                and_(
-                    PortfolioCompany.website.isnot(None),
-                    PortfolioCompany.website != "",
-                )
-            )
         )
-        website_result = await session.execute(website_stmt)
-        with_website = len(website_result.fetchall())
+        all_deals_result = await session.execute(all_deals_stmt)
+        all_deals = all_deals_result.fetchall()
 
-        # Deals with founders
-        founders_stmt = (
-            select(Deal.id)
-            .where(Deal.founders_json.isnot(None))
-        )
-        founders_result = await session.execute(founders_stmt)
-        with_founders = len(founders_result.fetchall())
-
-        # Deals with at least one LinkedIn
-        # We need to check founders_json for linkedin_url
-        linkedin_stmt = (
-            select(Deal.id, Deal.founders_json)
-            .where(Deal.founders_json.isnot(None))
-        )
-        linkedin_result = await session.execute(linkedin_stmt)
-        linkedin_rows = linkedin_result.fetchall()
-
+        # Calculate metrics
+        with_website = 0
+        with_founders = 0
         with_linkedin = 0
-        for row in linkedin_rows:
-            try:
-                founders = json.loads(row.founders_json) if row.founders_json else []
-                if any(f.get("linkedin_url") for f in founders):
-                    with_linkedin += 1
-            except (json.JSONDecodeError, TypeError):
-                continue
+        with_both = 0
+        missing_both = 0
+
+        for row in all_deals:
+            has_website = bool(row.website and row.website.strip())
+            has_linkedin = False
+            has_founders = bool(row.founders_json)
+
+            if has_website:
+                with_website += 1
+
+            if has_founders:
+                with_founders += 1
+                try:
+                    founders = json.loads(row.founders_json)
+                    if any(f.get("linkedin_url") for f in founders):
+                        has_linkedin = True
+                        with_linkedin += 1
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Track deals with both website AND founder LinkedIn
+            if has_website and has_linkedin:
+                with_both += 1
+            # Track deals missing both website AND founder LinkedIn
+            elif not has_website and not has_linkedin:
+                missing_both += 1
 
         return {
             "total_deals": total_deals,
@@ -659,6 +662,8 @@ async def get_enrichment_coverage() -> Dict:
             "linkedin_percentage": round(with_linkedin / total_deals * 100, 1) if total_deals else 0,
             "missing_website": total_deals - with_website,
             "missing_linkedin": with_founders - with_linkedin,
+            "with_both": with_both,
+            "missing_both": missing_both,
         }
 
 
