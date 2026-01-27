@@ -4522,13 +4522,20 @@ async def enrich_deals(
 
                 # Update founders_json with LinkedIn URLs (with validation)
                 if enrichment.founder_linkedins or enrichment.ceo_linkedin:
+                    # FIX (2026-01): Create case-insensitive lookup for founder LinkedIn URLs
+                    # Previously case mismatch (e.g., "John Smith" vs "john smith") caused data loss
+                    founder_linkedins_lower = {
+                        k.lower(): v for k, v in (enrichment.founder_linkedins or {}).items()
+                    }
+
                     # Update existing founders with LinkedIn URLs
                     for f in founders:
                         founder_name = f.get("name", "")
-                        if enrichment.founder_linkedins and founder_name in enrichment.founder_linkedins:
+                        founder_name_lower = founder_name.lower()
+                        if founder_linkedins_lower and founder_name_lower in founder_linkedins_lower:
                             if not f.get("linkedin_url") or force_update:
                                 # Validate founder LinkedIn URL before persisting
-                                raw_url = enrichment.founder_linkedins[founder_name]
+                                raw_url = founder_linkedins_lower[founder_name_lower]
                                 sanitized = sanitize_linkedin_url(raw_url)
                                 if sanitized and is_valid_linkedin_profile(sanitized):
                                     f["linkedin_url"] = sanitized
@@ -5142,7 +5149,10 @@ class BackfillResponse(BaseModel):
 
 
 class EnrichmentCoverageResponse(BaseModel):
-    """Enrichment coverage statistics."""
+    """Enrichment coverage statistics.
+
+    FIX (2026-01): Added with_both and missing_both for complete coverage tracking.
+    """
     total_deals: int
     with_website: int
     website_percentage: float
@@ -5151,6 +5161,8 @@ class EnrichmentCoverageResponse(BaseModel):
     linkedin_percentage: float
     missing_website: int
     missing_linkedin: int
+    with_both: int  # Has both website AND at least one founder LinkedIn
+    missing_both: int  # Missing both website AND founder LinkedIn
 
 
 @app.get("/enrichment/stats", response_model=EnrichmentCoverageResponse)

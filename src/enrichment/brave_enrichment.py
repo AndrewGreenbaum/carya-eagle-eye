@@ -423,10 +423,17 @@ KNOWN_FALSE_POSITIVES = {
 # Domain keywords that indicate wrong industry (unless company name contains them)
 HEALTHCARE_DOMAIN_KEYWORDS = ["health", "medical", "clinic", "hospital", "pharma", "care"]
 
-# Valid TLDs for startup websites (FIX #7: added net, org, us, uk, eu, info)
+# Valid TLDs for startup websites
+# FIX #7: added net, org, us, uk, eu, info
+# FIX (2026-01): Added European country TLDs and industry-specific TLDs
 VALID_TLDS = (
+    # Common startup TLDs
     "com", "io", "ai", "co", "dev", "app", "tech", "cloud", "xyz", "me",
     "health", "bio", "so", "gg", "net", "org", "us", "uk", "eu", "info",
+    # European country TLDs (many EU startups use these)
+    "de", "ch", "nl", "fr", "se", "no", "at", "be", "fi", "dk", "es", "it", "pl",
+    # Industry-specific TLDs
+    "studio", "solutions", "systems", "ventures", "fund", "consulting",
 )
 
 
@@ -518,6 +525,15 @@ class BraveEnrichmentClient:
                     if healthcare_kw in domain_slug and healthcare_kw not in company_slug:
                         return False
 
+            # FIX (2026-01): Handle very short company names (2-3 chars) like "GV", "AI"
+            # For these, require exact domain match to avoid false positives
+            if len(company_slug) <= 3:
+                if company_slug == domain_slug:
+                    return True
+                # Also check if company slug exactly equals domain (case: "GV" → "gv.com")
+                # Already covered by above, but be explicit
+                return False  # For short names, only exact match is safe
+
             # FIX: Stricter matching - require significant overlap
             # Option A: Full company slug appears in domain
             if company_slug in domain_slug:
@@ -528,7 +544,7 @@ class BraveEnrichmentClient:
             if len(domain_slug) >= 4 and domain_slug in company_slug:
                 return True
 
-            # FIX #10: Option C-alt: Any significant word (4+ chars) matches domain exactly
+            # FIX #10: Option C-alt: Any significant word (2+ chars) matches domain exactly
             # Handles "AI Corp" → "aicorp.com" where domain = "aicorp"
             for word in all_words:
                 if len(word) >= 2 and word == domain_slug:
@@ -888,7 +904,10 @@ class BraveEnrichmentClient:
                 url = result.get("url", "")
                 linkedin_url = self._extract_linkedin_url(url)
                 if linkedin_url:
-                    await _mark_linkedin_success(founder_name, company_name, linkedin_url)
+                    # FIX (2026-01): Don't mark success here - return URL without caching.
+                    # The caller (enrich_with_context) will validate and cache only if valid.
+                    # Previously this caused cache poisoning: URLs were cached as "success"
+                    # before validation, then rejected by validation, but cache was already poisoned.
                     return linkedin_url
 
         # FIX #7: Mark this as a failed search to avoid redundant future calls
@@ -1048,6 +1067,9 @@ class BraveEnrichmentClient:
                         if not result.ceo_linkedin:
                             result.ceo_name = founder_name
                             result.ceo_linkedin = linkedin
+                        # FIX (2026-01): Cache success ONLY after validation passes
+                        # This fixes cache poisoning from fallback searches
+                        await _mark_linkedin_success(founder_name, context.company_name, linkedin)
                         logger.info(f"LinkedIn VALIDATED for {founder_name}: {linkedin}")
                     else:
                         reason = "wrong company" if validation.profile_current_company else "could not validate"
@@ -1055,6 +1077,8 @@ class BraveEnrichmentClient:
                             f"LinkedIn REJECTED for {founder_name} at {context.company_name}: {reason} "
                             f"(profile shows '{validation.profile_current_company}' with title '{validation.profile_current_title}')"
                         )
+                        # FIX (2026-01): Mark as failure to avoid re-searching invalid URLs
+                        await _mark_linkedin_failure(founder_name, context.company_name)
 
                 await asyncio.sleep(self.rate_limit_delay)
 
@@ -1116,10 +1140,14 @@ class BraveEnrichmentClient:
                     result.ceo_name = final_name
                     result.ceo_linkedin = linkedin_url
                     result.founder_linkedins[final_name] = linkedin_url
+                    # FIX (2026-01): Cache success ONLY after validation passes
+                    await _mark_linkedin_success(final_name, context.company_name, linkedin_url)
                     logger.info(f"Found CEO for {context.company_name} via fallback: {final_name}")
                 else:
                     reason = "wrong company" if validation.profile_current_company else "could not validate"
                     logger.warning(f"CEO LinkedIn rejected for {context.company_name}: {reason}")
+                    # FIX (2026-01): Mark as failure to avoid re-searching invalid URLs
+                    await _mark_linkedin_failure(ceo_name, context.company_name)
             await asyncio.sleep(self.rate_limit_delay)
 
         return result
