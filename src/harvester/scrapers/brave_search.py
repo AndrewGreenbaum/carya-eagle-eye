@@ -429,7 +429,20 @@ class BraveSearchScraper:
 
         FIX: Added retry logic for 5xx errors and improved timeout handling.
         FIX: Uses shared module-level HTTP client to avoid resource leaks.
+        FIX 2026-01: Uses per_request_timeout from settings (45s default) to prevent
+        individual articles from hanging the entire pipeline.
         """
+        try:
+            return await asyncio.wait_for(
+                self._fetch_full_article_impl(url, max_retries),
+                timeout=settings.per_request_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"TIMEOUT_SKIP: fetch_full_article exceeded {settings.per_request_timeout}s for {url[:80]}...")
+            return None
+
+    async def _fetch_full_article_impl(self, url: str, max_retries: int = 3) -> Optional[str]:
+        """Internal implementation of fetch_full_article (wrapped with timeout)."""
         client = await _get_article_fetch_client()
         for attempt in range(max_retries):
             try:
