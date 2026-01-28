@@ -2902,6 +2902,9 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
     Catches:
     - Fund raises (e.g., "a16z raises $15B Fund VII")
     - LP structures from SEC filings (e.g., "SP-1216 Fund I", "AU-0707 Fund III", "Feld Ventures Fund, LP")
+    - SPV structures (e.g., "Perplexity SPV1 Emerging Global", "SpaceX SPV-2024")
+    - LLC/LP entities without comma (e.g., "Midwest REO RR LLC")
+    - Fund-like suffixes (e.g., "Partners III", "Emerging Global")
     """
     if not deal or not deal.startup_name:
         return deal
@@ -2924,10 +2927,26 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
         )
         return deal
 
-    # Pattern: ends with ", LP" or ", LLC" (typical fund legal entities)
+    # Pattern: SPV (Special Purpose Vehicle) - catches "SPV1", "SPV-2024", "SPV I"
+    # These are investment vehicle structures, not startups
+    # SAFE: Real startups never have SPV in their name
+    if re.search(r'\bspv[\s\-]?([0-9]+|[ivxlc]+)?\b', name, re.IGNORECASE):
+        logger.warning(
+            f"Rejecting SPV structure: '{name}' - contains SPV pattern"
+        )
+        increment_extraction_stat("fund_structure_rejected")
+        deal.is_new_announcement = False
+        deal.announcement_rejection_reason = (
+            f"Name contains SPV (Special Purpose Vehicle): {name} (investment structure, not startup)"
+        )
+        return deal
+
+    # Pattern: ends with ", LP" or ", LLC" WITH COMMA (typical fund legal entities)
+    # The comma indicates formal legal name, not brand name
+    # SAFE: Startups use brand names, not "Company, LLC"
     if re.search(r',\s*(lp|llc|llp)$', name, re.IGNORECASE):
         logger.warning(
-            f"Rejecting LP entity: '{name}' - name ends with legal entity suffix"
+            f"Rejecting LP entity: '{name}' - name ends with comma + legal entity suffix"
         )
         increment_extraction_stat("fund_structure_rejected")
         deal.is_new_announcement = False
@@ -2936,7 +2955,12 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
         )
         return deal
 
-    # Pattern: fund code format (e.g., "SP-1216", "AU-0707")
+    # NOTE: We intentionally do NOT filter on " LLC" / " LP" without comma
+    # Some real startups file SEC Form D as LLC before converting to C-corp
+    # We'd rather have fund garbage than miss real startups
+
+    # Pattern: fund code format (e.g., "SP-1216 Fund I", "AU-0707 Fund III")
+    # SAFE: These are internal fund codes, never startup names
     if re.search(r'^[A-Z]{2,4}-\d{3,}', name) and 'fund' in name.lower():
         logger.warning(
             f"Rejecting fund code: '{name}' - matches fund code pattern"

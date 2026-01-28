@@ -433,6 +433,35 @@ class SECEdgarScraper:
             )
             return None  # FIX: Return None for consistency
 
+    def _looks_like_fund_structure(self, company_name: str) -> bool:
+        """
+        Fast pre-filter for OBVIOUS fund structures only.
+
+        CONSERVATIVE: Only reject patterns that are 100% fund structures.
+        We'd rather have false positives (fund garbage) than miss real startups.
+
+        Returns True if the name is definitely a fund/SPV structure.
+        """
+        name_lower = company_name.lower()
+
+        # SPV pattern - catches "SPV1", "SPV2", "SPV-2024", "SPV I"
+        # Real startups NEVER have SPV in their name
+        if re.search(r'\bspv[\s\-]?[0-9ivxlc]*\b', name_lower):
+            return True
+
+        # Fund + roman numeral or number - "Fund VII", "Fund 3", "Seed Fund XVII"
+        # This is always a fund series, never a startup
+        if re.search(r'\bfund\s*[ivxlc0-9]+', name_lower):
+            return True
+
+        # NOTE: We intentionally do NOT filter on:
+        # - LLC/LP suffix alone (some startups file as LLC before converting)
+        # - "Partners/Capital/Ventures" alone (could be startup names)
+        # - "Emerging" patterns (too aggressive)
+        # These are handled in extractor.py with more context from the LLM
+
+        return False
+
     def match_tracked_fund(self, filing: FormDFiling) -> Optional[str]:
         """
         Check if filing mentions any tracked fund.
@@ -572,11 +601,22 @@ class SECEdgarScraper:
         # Fetch recent filings
         filings = await self.fetch_recent_filings(hours=hours)
 
+        fund_structure_rejected = 0
+
         for filing in filings:
             # Skip duplicates
             if filing.cik in seen_ciks:
                 continue
             seen_ciks.add(filing.cik)
+
+            # Pre-filter: Reject obvious fund structures before fetching details
+            # This saves API calls and processing time
+            if self._looks_like_fund_structure(filing.company_name):
+                fund_structure_rejected += 1
+                logger.debug(
+                    f"SEC EDGAR: Pre-filter rejected fund structure: {filing.company_name}"
+                )
+                continue
 
             # Optionally fetch full details
             if fetch_details:
@@ -610,6 +650,14 @@ class SECEdgarScraper:
 
         # Combine: fund-matched first, then likely VC
         articles = articles_fund_matched + articles_likely_vc
+
+        # Log stats for monitoring
+        if fund_structure_rejected > 0:
+            logger.info(
+                f"SEC EDGAR: Pre-filtered {fund_structure_rejected} fund structures "
+                f"(SPV/LLC/LP patterns)"
+            )
+
         return articles
 
 
