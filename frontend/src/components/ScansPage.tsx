@@ -452,7 +452,7 @@ function ScanRow({ scan, isExpanded, onToggle }: { scan: Scan; isExpanded: boole
 
       {/* Expanded content */}
       {isExpanded && (
-        <div className="border-t border-slate-700/50 p-4 bg-slate-900/50">
+        <div className="border-t border-slate-700/50 p-4 bg-slate-900/50 max-h-[600px] overflow-y-auto">
           {loading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="w-6 h-6 animate-spin text-slate-400" />
@@ -551,7 +551,7 @@ export function ScansPage({ onBack }: ScansPageProps = {}) {
   const totalPages = Math.ceil(totalCount / limit);
 
   return (
-    <div className="min-h-full bg-slate-950 text-white">
+    <div className="h-full overflow-y-auto bg-slate-950 text-white">
       {/* Header */}
       <div className="border-b border-slate-800 bg-slate-900/50">
         <div className="max-w-7xl mx-auto px-4 py-6">
