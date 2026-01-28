@@ -43,27 +43,29 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
       role="article"
       aria-label={`${item.companyName}${item.leadInvestor ? `, led by ${item.leadInvestor}` : ''}`}
       className={`
-        p-3 border border-zinc-700/60 bg-zinc-900/40 cursor-grab rounded-lg select-none
-        hover:bg-zinc-800/50 hover:border-zinc-600/60 transition-all duration-100
+        p-4 border bg-zinc-900/40 cursor-grab rounded-lg select-none
+        transition-all duration-100
         ${isCurrentlyDragging ? 'opacity-30 cursor-grabbing' : ''}
-        ${isSelected ? 'bg-zinc-800/50 border-zinc-600' : ''}
+        ${isSelected
+          ? 'border-emerald-500 bg-zinc-800/60 ring-1 ring-emerald-500/30'
+          : 'border-zinc-800/40 hover:bg-zinc-800/50 hover:border-zinc-700/60'}
       `}
       onClick={() => !isCurrentlyDragging && onClick?.()}
     >
       {/* Row 1: Company + Amount */}
       <div className="flex items-baseline justify-between gap-4">
-        <h4 className="text-[14px] font-medium text-slate-300 tracking-[-0.01em] truncate">
+        <h4 className="text-[15px] font-medium text-slate-200 tracking-[-0.01em] truncate">
           {item.companyName}
         </h4>
         {displayAmount && (
-          <span className="text-[14px] font-medium tabular-nums shrink-0 text-emerald-400">
+          <span className="text-[15px] font-medium tabular-nums shrink-0 text-emerald-400">
             {displayAmount}
           </span>
         )}
       </div>
 
       {/* Row 2: Round Badge · Investor | Date */}
-      <div className="flex items-center justify-between gap-3 mt-2">
+      <div className="flex items-center justify-between gap-3 mt-2.5">
         <div className="flex items-center gap-2 min-w-0">
           {item.roundType && (
             <span className={`text-[9px] font-medium uppercase px-1.5 py-0.5 rounded border shrink-0 ${roundStyle}`}>
@@ -71,17 +73,17 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
             </span>
           )}
           {item.leadInvestor && (
-            <span className="text-[11px] text-slate-500 truncate">{item.leadInvestor}</span>
+            <span className="text-[12px] text-slate-400 truncate">{item.leadInvestor}</span>
           )}
         </div>
-        <span className="text-[10px] text-slate-600 font-mono font-light shrink-0">
+        <span className="text-[11px] text-slate-500 font-mono font-light shrink-0">
           {formatAddedDate(item.createdAt)}
         </span>
       </div>
 
       {/* Next Step */}
       {item.nextStep && (
-        <div className="text-[10px] text-amber-400/60 mt-2 truncate">
+        <div className="text-[11px] text-amber-400/70 mt-2.5 truncate">
           {item.nextStep}
         </div>
       )}
