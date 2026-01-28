@@ -9,6 +9,9 @@ restartPolicyMaxRetries = 5
 releaseCommand = "python -m alembic upgrade head"
 # Time between SIGTERM and SIGKILL - allows graceful scan shutdown
 drainingSeconds = 15
+# Health check: longer timeout for long-running scans
+healthcheckPath = "/health"
+healthcheckTimeout = 300
 
 [service]
 internalPort = 8000
