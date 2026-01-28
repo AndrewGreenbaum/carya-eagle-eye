@@ -32,6 +32,7 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
   const isCurrentlyDragging = isDragging || isSortableDragging;
 
   const displayAmount = formatAmount(item.amount);
+  const roundStyle = getRoundStyle(item.roundType);
 
   return (
     <div
@@ -42,10 +43,10 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
       role="article"
       aria-label={`${item.companyName}${item.leadInvestor ? `, led by ${item.leadInvestor}` : ''}`}
       className={`
-        py-5 px-2 -mx-1 border-b border-zinc-800/40 cursor-grab rounded-md select-none
-        first:pt-1 hover:bg-zinc-800/15 transition-[background] duration-75
+        p-4 mb-3 border border-zinc-700/60 bg-zinc-900/40 cursor-grab rounded-lg select-none
+        hover:bg-zinc-800/50 hover:border-zinc-600/60 transition-all duration-100
         ${isCurrentlyDragging ? 'opacity-30 cursor-grabbing' : ''}
-        ${isSelected ? 'bg-zinc-800/15' : ''}
+        ${isSelected ? 'bg-zinc-800/50 border-zinc-600' : ''}
       `}
       onClick={() => !isCurrentlyDragging && onClick?.()}
     >
@@ -61,14 +62,19 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
         )}
       </div>
 
-      {/* Row 2: Round · Investor | Date */}
-      <div className="flex items-baseline justify-between gap-4 mt-1.5">
-        <span className="text-xs text-zinc-600 truncate">
-          {item.roundType && <>{item.roundType}</>}
-          {item.roundType && item.leadInvestor && <span className="text-zinc-500"> &middot; </span>}
-          {item.leadInvestor && <span className="text-zinc-500">{item.leadInvestor}</span>}
-        </span>
-        <span className="text-[11px] text-zinc-700 font-mono font-light shrink-0">
+      {/* Row 2: Round Badge · Investor | Date */}
+      <div className="flex items-center justify-between gap-3 mt-2">
+        <div className="flex items-center gap-2 min-w-0">
+          {item.roundType && (
+            <span className={`text-[10px] font-semibold uppercase px-2 py-0.5 rounded border shrink-0 ${roundStyle}`}>
+              {item.roundType}
+            </span>
+          )}
+          {item.leadInvestor && (
+            <span className="text-xs text-zinc-500 truncate">{item.leadInvestor}</span>
+          )}
+        </div>
+        <span className="text-[11px] text-zinc-600 font-mono font-light shrink-0">
           {formatAddedDate(item.createdAt)}
         </span>
       </div>
@@ -105,6 +111,31 @@ function formatAddedDate(dateString: string): string {
   } catch {
     return '';
   }
+}
+
+function getRoundStyle(roundType: string | undefined | null): string {
+  if (!roundType) return 'bg-slate-700/50 text-slate-400 border-slate-600/50';
+
+  const normalized = roundType.toLowerCase().replace(/\s+/g, '_');
+
+  const styles: Record<string, string> = {
+    seed: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
+    'pre-seed': 'bg-pink-500/20 text-pink-400 border-pink-500/30',
+    'pre_seed': 'bg-pink-500/20 text-pink-400 border-pink-500/30',
+    series_a: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30',
+    'series a': 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30',
+    series_b: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+    'series b': 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+    series_c: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30',
+    'series c': 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30',
+    series_d: 'bg-violet-500/20 text-violet-400 border-violet-500/30',
+    'series d': 'bg-violet-500/20 text-violet-400 border-violet-500/30',
+    'series d+': 'bg-violet-500/20 text-violet-400 border-violet-500/30',
+    series_e: 'bg-fuchsia-500/20 text-fuchsia-400 border-fuchsia-500/30',
+    growth: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+  };
+
+  return styles[normalized] || 'bg-slate-700/50 text-slate-400 border-slate-600/50';
 }
 
 function formatAmount(raw: string | undefined | null): string {
