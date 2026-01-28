@@ -80,6 +80,7 @@ class ScanJobGuard:
         self._engine = None
         self._session_factory = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._scan_task: Optional[asyncio.Task] = None
         self._success = False
         self._error_message: Optional[str] = None
         self._shutdown_requested = False
@@ -158,6 +159,10 @@ class ScanJobGuard:
     def set_failed(self, error_message: str):
         """Mark the job as failed with a specific error message."""
         self._error_message = error_message[:500]
+
+    def set_scan_task(self, task: asyncio.Task):
+        """Set scan task reference for cancellation on shutdown signal."""
+        self._scan_task = task
 
     async def _heartbeat_loop(self):
         """Background task that updates heartbeat every HEARTBEAT_INTERVAL seconds."""
@@ -293,15 +298,20 @@ class ScanJobGuard:
             logger.warning(f"[{self.job_id}] Could not restore signal handlers: {e}")
 
     async def _handle_signal(self, sig: signal.Signals):
-        """Handle shutdown signal - mark job as failed and request shutdown."""
+        """Handle shutdown signal - mark job as failed, cancel scan task, and request shutdown."""
         sig_name = signal.Signals(sig).name
-        logger.warning(f"[{self.job_id}] Received {sig_name}, marking job as failed")
+        logger.warning(f"[{self.job_id}] Received {sig_name}, cancelling scan")
 
         self._shutdown_requested = True
-        self._error_message = f"Process received {sig_name} signal"
+        self._error_message = f"Scan cancelled due to {sig_name} (deployment restart)"
 
         # Update status immediately (don't wait for context exit)
         await self._update_status("failed", self._error_message)
+
+        # Cancel the scan task so scheduler.shutdown() doesn't block
+        if self._scan_task and not self._scan_task.done():
+            self._scan_task.cancel()
+            logger.info(f"[{self.job_id}] Scan task cancelled")
 
 
 @asynccontextmanager
