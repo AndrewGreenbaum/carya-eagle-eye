@@ -2515,18 +2515,6 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
 # Job-level timeout (30 minutes max to prevent hanging forever)
 JOB_TIMEOUT_SECONDS = 1800
 
-# FIX 2026-01: Prevent concurrent scans - only one scan can run at a time
-# Note: Lock is lazily initialized to avoid creating it before event loop exists
-_scan_lock: Optional[asyncio.Lock] = None
-
-
-def _get_scan_lock() -> asyncio.Lock:
-    """Get or create the scan lock (lazy initialization for event loop safety)."""
-    global _scan_lock
-    if _scan_lock is None:
-        _scan_lock = asyncio.Lock()
-    return _scan_lock
-
 
 async def scheduled_scrape_job(trigger: str = "scheduled"):
     """
@@ -2543,57 +2531,47 @@ async def scheduled_scrape_job(trigger: str = "scheduled"):
     FIX: Wrapped in job-level timeout to prevent hanging forever.
     If job exceeds 30 minutes, it's killed and logged.
 
-    FIX 2026-01: Added lock to prevent concurrent scans. If a scan is
-    already running, new triggers are ignored with a warning.
-
     Args:
         trigger: How the job was triggered ("scheduled", "manual", "api")
     """
-    # Prevent concurrent scans (lazy init to avoid event loop issues)
-    lock = _get_scan_lock()
-    if lock.locked():
-        logger.warning(f"Scan already running, ignoring trigger={trigger}")
-        return
+    try:
+        await asyncio.wait_for(
+            _scheduled_scrape_job_impl(trigger),
+            timeout=JOB_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            f"SCRAPER_HEALTH_ALERT: Scheduled scrape job timed out after "
+            f"{JOB_TIMEOUT_SECONDS // 60} minutes - job killed"
+        )
+        # Update global tracking for observability
+        global _last_job_status, _last_job_error, _last_job_duration, _current_scan_job_id
+        _last_job_status = "timeout"
+        _last_job_error = f"Job timed out after {JOB_TIMEOUT_SECONDS} seconds"
+        _last_job_duration = JOB_TIMEOUT_SECONDS
 
-    async with lock:
-        try:
-            await asyncio.wait_for(
-                _scheduled_scrape_job_impl(trigger),
-                timeout=JOB_TIMEOUT_SECONDS
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                f"SCRAPER_HEALTH_ALERT: Scheduled scrape job timed out after "
-                f"{JOB_TIMEOUT_SECONDS // 60} minutes - job killed"
-            )
-            # Update global tracking for observability
-            global _last_job_status, _last_job_error, _last_job_duration, _current_scan_job_id
-            _last_job_status = "timeout"
-            _last_job_error = f"Job timed out after {JOB_TIMEOUT_SECONDS} seconds"
-            _last_job_duration = JOB_TIMEOUT_SECONDS
+        # FIX: Update database to mark scan as failed (was missing, caused stuck scans)
+        if _current_scan_job_id:
+            try:
+                from ..archivist.database import get_session
+                from ..archivist.models import ScanJob
+                from sqlalchemy import select
 
-            # FIX: Update database to mark scan as failed (was missing, caused stuck scans)
-            if _current_scan_job_id:
-                try:
-                    from ..archivist.database import get_session
-                    from ..archivist.models import ScanJob
-                    from sqlalchemy import select
-
-                    async with get_session() as session:
-                        result = await session.execute(
-                            select(ScanJob).where(ScanJob.id == _current_scan_job_id)
-                        )
-                        scan_job = result.scalar_one_or_none()
-                        if scan_job and scan_job.status == "running":
-                            scan_job.status = "failed"
-                            scan_job.error_message = f"Job timed out after {JOB_TIMEOUT_SECONDS} seconds"
-                            scan_job.completed_at = datetime.now(timezone.utc)
-                            await session.commit()
-                            logger.info(f"Marked timed-out scan {_current_scan_job_id} as failed")
-                except Exception as e:
-                    logger.error(f"Failed to update timed-out scan status: {e}")
-                finally:
-                    _current_scan_job_id = None
+                async with get_session() as session:
+                    result = await session.execute(
+                        select(ScanJob).where(ScanJob.id == _current_scan_job_id)
+                    )
+                    scan_job = result.scalar_one_or_none()
+                    if scan_job and scan_job.status == "running":
+                        scan_job.status = "failed"
+                        scan_job.error_message = f"Job timed out after {JOB_TIMEOUT_SECONDS} seconds"
+                        scan_job.completed_at = datetime.now(timezone.utc)
+                        await session.commit()
+                        logger.info(f"Marked timed-out scan {_current_scan_job_id} as failed")
+            except Exception as e:
+                logger.error(f"Failed to update timed-out scan status: {e}")
+            finally:
+                _current_scan_job_id = None
 
 
 async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
