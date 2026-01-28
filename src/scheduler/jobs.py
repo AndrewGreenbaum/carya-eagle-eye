@@ -2632,6 +2632,9 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
     # FIX 2026-01: Wrap phase execution with ScanJobGuard for heartbeat monitoring
     # and guaranteed status updates even on crash/OOM
     async with guarded_scan(scan_job_db_id, job_id) as guard:
+        # Pass task reference so guard can cancel on SIGTERM
+        if guard:
+            guard.set_scan_task(asyncio.current_task())
         try:
             # ===== PHASE 1: Scrape fund websites =====
             fund_slugs = get_implemented_scrapers()
@@ -2928,9 +2931,14 @@ def setup_scheduler() -> AsyncIOScheduler:
 
 
 def shutdown_scheduler():
-    """Gracefully shutdown the scheduler."""
+    """Shutdown the scheduler without waiting for running jobs.
+
+    FIX 2026-01: Changed from wait=True to wait=False to prevent blocking
+    during deployment. Running scans are cancelled via ScanJobGuard signal
+    handler before this is called.
+    """
     global scheduler
     if scheduler:
-        scheduler.shutdown(wait=True)
+        scheduler.shutdown(wait=False)
         logger.info("Scheduler shutdown complete")
         scheduler = None

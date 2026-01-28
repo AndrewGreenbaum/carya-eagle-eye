@@ -29,10 +29,12 @@ from ..config.settings import settings
 logger = logging.getLogger(__name__)
 
 # How often to check for stuck scans (seconds)
-MONITOR_INTERVAL = 300  # 5 minutes
+# FIX 2026-01: Reduced from 300s (5 min) to 60s (1 min) for faster detection
+MONITOR_INTERVAL = 60  # 1 minute
 
 # How long without heartbeat before a job is considered stuck (seconds)
-STUCK_THRESHOLD = 120  # 2 minutes
+# FIX 2026-01: Reduced from 120s (2 min) to 90s for faster detection
+STUCK_THRESHOLD = 90  # 90 seconds
 
 # Background task reference
 _monitor_task: Optional[asyncio.Task] = None

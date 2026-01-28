@@ -7,6 +7,8 @@ restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
 # Run migrations before starting the app
 releaseCommand = "python -m alembic upgrade head"
+# Time between SIGTERM and SIGKILL - allows graceful scan shutdown
+drainingSeconds = 15
 
 [service]
 internalPort = 8000
