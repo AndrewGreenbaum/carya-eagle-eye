@@ -11,7 +11,7 @@ releaseCommand = "python -m alembic upgrade head"
 drainingSeconds = 15
 # Health check: longer timeout for long-running scans
 healthcheckPath = "/health"
-healthcheckTimeout = 300
+healthcheckTimeout = 500
 
 [service]
 internalPort = 8000
