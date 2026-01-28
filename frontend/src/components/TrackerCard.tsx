@@ -43,7 +43,7 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
       role="article"
       aria-label={`${item.companyName}${item.leadInvestor ? `, led by ${item.leadInvestor}` : ''}`}
       className={`
-        p-4 mb-3 border border-zinc-700/60 bg-zinc-900/40 cursor-grab rounded-lg select-none
+        p-3 border border-zinc-700/60 bg-zinc-900/40 cursor-grab rounded-lg select-none
         hover:bg-zinc-800/50 hover:border-zinc-600/60 transition-all duration-100
         ${isCurrentlyDragging ? 'opacity-30 cursor-grabbing' : ''}
         ${isSelected ? 'bg-zinc-800/50 border-zinc-600' : ''}
