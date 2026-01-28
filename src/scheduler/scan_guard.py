@@ -164,6 +164,16 @@ class ScanJobGuard:
         """Set scan task reference for cancellation on shutdown signal."""
         self._scan_task = task
 
+    async def heartbeat(self):
+        """Manually update heartbeat - call this during long-running operations.
+
+        The background heartbeat task may not get CPU time during intensive
+        processing. Call this method at key checkpoints (between phases,
+        in loops) to ensure heartbeat stays fresh.
+        """
+        if not self._shutdown_requested:
+            await self._update_heartbeat()
+
     async def _heartbeat_loop(self):
         """Background task that updates heartbeat every HEARTBEAT_INTERVAL seconds."""
         while True:

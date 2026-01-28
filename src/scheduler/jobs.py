@@ -2658,6 +2658,10 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
                 f"articles={fund_articles}, deals={fund_deals}, errors={fund_errors}"
             )
 
+            # Manual heartbeat to prevent false "stuck" detection during long scans
+            if guard:
+                await guard.heartbeat()
+
             # ===== PHASE 2: Scrape external sources (THE FIX) =====
             logger.info(f"[{job_id}] Phase 2: Scraping external sources (Brave Search, SEC, etc.)")
 
@@ -2668,6 +2672,10 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
                 f"[{job_id}] Phase 2 complete: "
                 f"external_deals={external_deals}"
             )
+
+            # Manual heartbeat after Phase 2
+            if guard:
+                await guard.heartbeat()
 
             # ===== Calculate total stats =====
             total_deals = fund_deals + external_deals
@@ -2686,11 +2694,19 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
             enriched = await enrich_new_deals(limit=100)
             logger.info(f"[{job_id}] Enrichment complete: {enriched} companies updated")
 
+            # Manual heartbeat after Phase 3
+            if guard:
+                await guard.heartbeat()
+
             # ===== PHASE 4: Enrich deal dates =====
             # FIX: Date enrichment was never running - all the code existed but wasn't called
             logger.info(f"[{job_id}] Phase 4: Starting date enrichment (Brave + SEC verification)")
             dates_enriched = await enrich_deal_dates(limit=50)
             logger.info(f"[{job_id}] Date enrichment complete: {dates_enriched} deals updated")
+
+            # Manual heartbeat after Phase 4
+            if guard:
+                await guard.heartbeat()
 
             # Send notification
             await send_scrape_summary(
