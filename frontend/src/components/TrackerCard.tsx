@@ -52,11 +52,11 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
     >
       {/* Row 1: Company + Amount */}
       <div className="flex items-baseline justify-between gap-4">
-        <h4 className="text-[15px] font-semibold text-zinc-50 tracking-[-0.02em] truncate">
+        <h4 className="text-[14px] font-medium text-slate-300 tracking-[-0.01em] truncate">
           {item.companyName}
         </h4>
         {displayAmount && (
-          <span className="text-[15px] font-medium tabular-nums shrink-0 text-emerald-400">
+          <span className="text-[14px] font-medium tabular-nums shrink-0 text-emerald-400">
             {displayAmount}
           </span>
         )}
@@ -66,22 +66,22 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
       <div className="flex items-center justify-between gap-3 mt-2">
         <div className="flex items-center gap-2 min-w-0">
           {item.roundType && (
-            <span className={`text-[10px] font-semibold uppercase px-2 py-0.5 rounded border shrink-0 ${roundStyle}`}>
+            <span className={`text-[9px] font-medium uppercase px-1.5 py-0.5 rounded border shrink-0 ${roundStyle}`}>
               {item.roundType}
             </span>
           )}
           {item.leadInvestor && (
-            <span className="text-xs text-zinc-500 truncate">{item.leadInvestor}</span>
+            <span className="text-[11px] text-slate-500 truncate">{item.leadInvestor}</span>
           )}
         </div>
-        <span className="text-[11px] text-zinc-600 font-mono font-light shrink-0">
+        <span className="text-[10px] text-slate-600 font-mono font-light shrink-0">
           {formatAddedDate(item.createdAt)}
         </span>
       </div>
 
       {/* Next Step */}
       {item.nextStep && (
-        <div className="text-[11px] text-amber-400/60 mt-2 truncate">
+        <div className="text-[10px] text-amber-400/60 mt-2 truncate">
           {item.nextStep}
         </div>
       )}
