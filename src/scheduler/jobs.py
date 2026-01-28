@@ -2516,7 +2516,16 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
 JOB_TIMEOUT_SECONDS = 1800
 
 # FIX 2026-01: Prevent concurrent scans - only one scan can run at a time
-_scan_lock = asyncio.Lock()
+# Note: Lock is lazily initialized to avoid creating it before event loop exists
+_scan_lock: Optional[asyncio.Lock] = None
+
+
+def _get_scan_lock() -> asyncio.Lock:
+    """Get or create the scan lock (lazy initialization for event loop safety)."""
+    global _scan_lock
+    if _scan_lock is None:
+        _scan_lock = asyncio.Lock()
+    return _scan_lock
 
 
 async def scheduled_scrape_job(trigger: str = "scheduled"):
@@ -2540,12 +2549,13 @@ async def scheduled_scrape_job(trigger: str = "scheduled"):
     Args:
         trigger: How the job was triggered ("scheduled", "manual", "api")
     """
-    # Prevent concurrent scans
-    if _scan_lock.locked():
+    # Prevent concurrent scans (lazy init to avoid event loop issues)
+    lock = _get_scan_lock()
+    if lock.locked():
         logger.warning(f"Scan already running, ignoring trigger={trigger}")
         return
 
-    async with _scan_lock:
+    async with lock:
         try:
             await asyncio.wait_for(
                 _scheduled_scrape_job_impl(trigger),
