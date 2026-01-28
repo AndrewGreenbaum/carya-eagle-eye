@@ -277,6 +277,25 @@ export function Tracker() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [columns, items, selectedColIdx, selectedCardIdx, isModalOpen]);
 
+  // Scroll selected card into view
+  useEffect(() => {
+    if (selectedColIdx < 0 || selectedCardIdx < 0) return;
+    if (!columns[selectedColIdx]) return;
+
+    const colItems = items
+      .filter((i) => i.status === columns[selectedColIdx].slug)
+      .sort((a, b) => a.position - b.position);
+
+    const selectedItem = colItems[selectedCardIdx];
+    if (!selectedItem) return;
+
+    // Find the card element by data attribute
+    const cardEl = document.querySelector(`[data-tracker-item-id="${selectedItem.id}"]`);
+    if (cardEl) {
+      cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    }
+  }, [selectedColIdx, selectedCardIdx, columns, items]);
+
   const getItemsByStatus = (status: TrackerStatus): TrackerItem[] => {
     return items
       .filter((item) => item.status === status)

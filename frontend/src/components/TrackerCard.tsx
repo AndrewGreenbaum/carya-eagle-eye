@@ -41,6 +41,7 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
       {...attributes}
       {...listeners}
       role="article"
+      data-tracker-item-id={item.id}
       aria-label={`${item.companyName}${item.leadInvestor ? `, led by ${item.leadInvestor}` : ''}`}
       className={`
         p-4 border bg-zinc-900/40 cursor-grab rounded-lg select-none
