@@ -430,7 +430,17 @@ export const STAGE_LABELS: Record<InvestmentStage, string> = {
 // Tracker CRM Types
 // ============================================
 
-// TrackerStatus is now a string to support dynamic columns
+// Strict typing for tracker column slugs
+export enum TrackerColumnSlug {
+  WATCHING = 'watching',
+  REACHED_OUT = 'reached_out',
+  IN_CONVERSATION = 'in_conversation',
+  CLOSING_SPV = 'closing_spv',
+  SPV_COMPLETE = 'spv_complete',
+  SPV_REJECTED = 'spv_rejected',
+}
+
+// TrackerStatus is a string to support dynamic columns
 export type TrackerStatus = string;
 
 // Configurable column type
@@ -497,14 +507,14 @@ export const TRACKER_COLOR_CLASSES: Record<string, { dot: string; bg: string; bo
   orange: { dot: 'bg-orange-500', bg: 'bg-orange-500/20', border: 'border-orange-500/30' },
 };
 
-// Legacy constants for backward compatibility
-export const TRACKER_STATUS_LABELS: Record<string, string> = {
-  watching: 'Watching',
-  reached_out: 'Reached Out',
-  in_conversation: 'In Conversation',
-  closing_spv: 'Closing SPV',
-  spv_complete: 'SPV Complete',
-  spv_rejected: 'SPV Rejected',
+// Legacy constants for backward compatibility (using enum for type safety)
+export const TRACKER_STATUS_LABELS: Record<TrackerColumnSlug, string> = {
+  [TrackerColumnSlug.WATCHING]: 'Watching',
+  [TrackerColumnSlug.REACHED_OUT]: 'Reached Out',
+  [TrackerColumnSlug.IN_CONVERSATION]: 'In Conversation',
+  [TrackerColumnSlug.CLOSING_SPV]: 'Closing SPV',
+  [TrackerColumnSlug.SPV_COMPLETE]: 'SPV Complete',
+  [TrackerColumnSlug.SPV_REJECTED]: 'SPV Rejected',
 };
 
 export const TRACKER_STATUS_COLORS: Record<string, string> = {

@@ -238,6 +238,53 @@ new Date(y, m-1, d);
 - "Unseen" tracking is client-side only (localStorage: `carya-seen-deals`)
 - If empty: check `/scans` - likely all recent scans failed
 
+### Drag-and-Drop Architecture
+
+**Library:** @dnd-kit v6.3.1 (headless React drag-and-drop)
+
+**Column Identification:**
+- Column ID = `column.slug` (e.g., "watching", "spv_complete")
+- Display name = `column.displayName` (e.g., "Watching", "SPV Complete")
+- Item status = `item.status` (MUST match a column.slug)
+
+**Files:**
+- `frontend/src/components/Tracker.tsx` - Main orchestrator, DndContext setup
+- `frontend/src/components/TrackerColumn.tsx` - Drop zones (useDroppable)
+- `frontend/src/components/TrackerCard.tsx` - Draggable cards (useSortable)
+
+**State Management:**
+- React local state (useState)
+- Optimistic updates: UI updates immediately
+- Backend sync: API call to `/tracker/items/{id}/move`
+- Rollback on error: Reverts to previous state if API fails
+
+**Critical: Column Loading (2026-02 fix):**
+- Columns MUST load before drag-and-drop works
+- Race condition protection: Sensors disabled until `isLoading === false`
+- Loading state prevents drag attempts before columns load
+- Comprehensive logging: All drag events logged with `[DND]` prefix for debugging
+
+**Troubleshooting Drag Issues:**
+1. Open DevTools console
+2. Look for `[Tracker] Loaded X columns` on mount
+3. Drag a card and check for `[DND]` logs
+4. If "Drop target not found", column slug doesn't match item.status
+5. If "Columns not loaded", API call failed or still loading
+6. If "Tracker is still loading", page refreshed mid-drag - wait for load to complete
+
+**Valid Column Slugs (as of 2026-02):**
+- `watching`, `reached_out`, `in_conversation`
+- `closing_spv`, `spv_complete`, `spv_rejected`
+
+**TypeScript Enum:** `TrackerColumnSlug` in `frontend/src/types/index.ts`
+
+**2026-02 Drag-and-Drop Fixes:**
+- **Loading guard:** Sensors disabled until columns load (prevents race condition)
+- **Defensive checks:** Validates columns.length > 0 before processing drops
+- **Comprehensive logging:** All drag events, errors, and state transitions logged
+- **Better error messages:** Specific messages for 404/403/network errors (5s timeout instead of 3s)
+- **TypeScript enum:** TrackerColumnSlug prevents typos in column references
+
 ## Development
 
 **IMPORTANT: Always use the Python 3.11 virtual environment for all Python commands:**

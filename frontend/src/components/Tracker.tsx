@@ -53,6 +53,7 @@ export function Tracker() {
   const [modalItem, setModalItem] = useState<TrackerItem | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   // Column modal state
   const [isColumnModalOpen, setIsColumnModalOpen] = useState(false);
   const [editingColumn, setEditingColumn] = useState<TrackerColumnType | null>(null);
@@ -77,10 +78,20 @@ export function Tracker() {
   const loadColumns = useCallback(async () => {
     try {
       const response = await fetchTrackerColumns();
-      setColumns(response.columns.sort((a, b) => a.position - b.position));
+      const loadedColumns = response.columns.sort((a, b) => a.position - b.position);
+
+      // Validate columns loaded successfully
+      if (loadedColumns.length === 0) {
+        console.warn('[Tracker] No columns returned from API - drag-and-drop will not work');
+        setError('Failed to load tracker columns. Drag-and-drop is disabled.');
+      } else {
+        console.log('[Tracker] Loaded', loadedColumns.length, 'columns:', loadedColumns.map(c => c.slug));
+      }
+
+      setColumns(loadedColumns);
     } catch (err) {
-      console.error('Failed to load columns:', err);
-      // Don't set error - columns are secondary, items are primary
+      console.error('[Tracker] Failed to load columns:', err);
+      setError('Failed to load tracker columns. Please refresh the page.');
     }
   }, []);
 
@@ -96,7 +107,12 @@ export function Tracker() {
   }, []);
 
   const loadAll = useCallback(async () => {
-    await Promise.all([loadColumns(), loadItems()]);
+    setIsLoading(true);
+    try {
+      await Promise.all([loadColumns(), loadItems()]);
+    } finally {
+      setIsLoading(false);
+    }
   }, [loadColumns, loadItems]);
 
   useEffect(() => {
@@ -320,35 +336,70 @@ export function Tracker() {
     const { active, over } = event;
     setActiveItem(null);
 
-    if (!over) return;
+    // Early exit validations with logging
+    if (!over) {
+      console.warn('[DND] Drop canceled - no valid drop zone');
+      return;
+    }
 
     const draggedItem = items.find((i) => i.id === active.id);
-    if (!draggedItem) return;
+    if (!draggedItem) {
+      console.error('[DND] Dragged item not found in state:', active.id);
+      setError('Item not found. Please refresh the page.');
+      return;
+    }
+
+    // CRITICAL FIX: Validate columns loaded
+    if (columns.length === 0) {
+      console.error('[DND] Columns not loaded - cannot process drop');
+      setError('Tracker is still loading. Please try again.');
+      setTimeout(() => setError(null), 3000);
+      return;
+    }
 
     let targetStatus: TrackerStatus;
     let targetPosition: number;
 
+    // Determine target (column or card)
     const columnSlugs = columns.map((c) => c.slug);
+    console.log('[DND] Drop target:', over.id, 'Available columns:', columnSlugs);
+
     if (columnSlugs.includes(over.id as string)) {
-      // Dropped on a column
+      // Dropped on column
+      console.log('[DND] Dropped on column:', over.id);
       targetStatus = over.id as TrackerStatus;
       const columnItems = getItemsByStatus(targetStatus);
       targetPosition = columnItems.length;
     } else {
-      // Dropped on another card
+      // Dropped on card
       const overItem = items.find((i) => i.id === over.id);
-      if (!overItem) return;
-
+      if (!overItem) {
+        console.error('[DND] Drop target not found - neither column nor card:', over.id);
+        console.error('[DND] Available column slugs:', columnSlugs);
+        console.error('[DND] Available item IDs:', items.map(i => i.id));
+        setError(`Cannot drop here. Target "${over.id}" is invalid.`);
+        setTimeout(() => setError(null), 5000);
+        return;
+      }
+      console.log('[DND] Dropped on card:', overItem.id, 'in column:', overItem.status);
       targetStatus = overItem.status;
       const columnItems = getItemsByStatus(targetStatus);
       const overIndex = columnItems.findIndex((i) => i.id === over.id);
       targetPosition = overIndex >= 0 ? overIndex : columnItems.length;
     }
 
-    // Skip if no actual change
+    // Skip if no change (but log it)
     if (draggedItem.status === targetStatus && draggedItem.position === targetPosition) {
+      console.log('[DND] Skipped - no position change');
       return;
     }
+
+    console.log('[DND] Moving item:', {
+      itemId: draggedItem.id,
+      from: draggedItem.status,
+      to: targetStatus,
+      position: targetPosition
+    });
 
     // Store previous state for rollback
     const previousItems = [...items];
@@ -377,12 +428,25 @@ export function Tracker() {
     // Sync with backend (async, don't block UI)
     try {
       await moveTrackerItem(draggedItem.id, targetStatus, targetPosition);
-    } catch (err) {
-      console.error('Failed to move item:', err);
-      // Rollback to previous state instead of full reload
+      console.log('[DND] Move successful');
+    } catch (err: any) {
+      console.error('[DND] Move failed:', err);
+
+      // Rollback
       setItems(previousItems);
-      setError('Failed to move item. Please try again.');
-      setTimeout(() => setError(null), 3000);
+
+      // Specific error messages
+      if (err.response?.status === 404) {
+        setError(`Column "${targetStatus}" not found. Please refresh.`);
+      } else if (err.response?.status === 403) {
+        setError('You do not have permission to move this item.');
+      } else if (err.message?.includes('network')) {
+        setError('Network error. Please check your connection.');
+      } else {
+        setError(`Failed to move item: ${err.message || 'Unknown error'}`);
+      }
+
+      setTimeout(() => setError(null), 5000);
     }
   };
 
@@ -569,10 +633,17 @@ export function Tracker() {
         </div>
       )}
 
+      {/* Loading State */}
+      {isLoading && (
+        <div className="flex items-center justify-center h-64">
+          <div className="text-slate-400">Loading tracker...</div>
+        </div>
+      )}
+
       {/* Kanban Board */}
       <div className="flex-1 min-h-0 overflow-auto px-6 sm:px-12 pb-12">
         <DndContext
-          sensors={sensors}
+          sensors={isLoading ? [] : sensors}
           collisionDetection={closestCorners}
           onDragStart={handleDragStart}
           onDragOver={handleDragOver}
