@@ -203,6 +203,9 @@ _extraction_stats = {
     "founders_removed": 0,         # Founders removed for not being in text
     "relative_date_corrected": 0,  # Dates corrected from relative date phrases (e.g., "6 months ago")
     "fund_raise_rejected": 0,      # Deals rejected because startup name is a tracked VC fund
+    "sonnet_reextract_attempts": 0,  # Hybrid Sonnet re-extraction attempts
+    "sonnet_improved": 0,          # Sonnet improved Haiku result (lead confirmed, more founders, or +0.1 confidence)
+    "sonnet_wasted": 0,            # Sonnet did not improve Haiku result (5x cost, no benefit)
 }
 _extraction_stats_thread_lock = threading.Lock()
 
@@ -2231,11 +2234,17 @@ async def extract_deal(
                     # COST TRACKING (Jan 2026): Log Sonnet hit rate to measure ROI
                     # Track: did Sonnet upgrade weak evidence to confirmed lead?
                     # If <30% hit rate, consider disabling hybrid extraction
+                    increment_extraction_stat("sonnet_reextract_attempts")
                     sonnet_improved = (
                         not sonnet_response.lead_evidence_weak
                         or len(sonnet_response.founders) > len(response.founders)
                         or sonnet_response.confidence_score > response.confidence_score + 0.1
                     )
+                    if sonnet_improved:
+                        increment_extraction_stat("sonnet_improved")
+                    else:
+                        increment_extraction_stat("sonnet_wasted")
+
                     logger.info(
                         f"HYBRID_RESULT: {sonnet_response.startup_name} | "
                         f"lead_confirmed={not sonnet_response.lead_evidence_weak} | "
@@ -2341,7 +2350,13 @@ async def extract_deal(
                 )
                 if sonnet_response:
                     # Track: did Sonnet upgrade weak evidence to confirmed lead?
+                    increment_extraction_stat("sonnet_reextract_attempts")
                     sonnet_improved = not sonnet_response.lead_evidence_weak
+                    if sonnet_improved:
+                        increment_extraction_stat("sonnet_improved")
+                    else:
+                        increment_extraction_stat("sonnet_wasted")
+
                     logger.info(
                         f"HYBRID_RESULT_HIGH_CONF: {sonnet_response.startup_name} | "
                         f"lead_confirmed={not sonnet_response.lead_evidence_weak} | "

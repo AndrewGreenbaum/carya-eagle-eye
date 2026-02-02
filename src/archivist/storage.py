@@ -1019,21 +1019,31 @@ async def find_duplicate_deal(
         # Also check with company_names_match for fuzzy match on same day
         # FIX: Use company_names_match() instead of exact normalized comparison
         # This catches "Leona" vs "Leona Health" where 'health' is a known suffix
-        tier2_fuzzy_stmt = (
-            select(Deal, PortfolioCompany)
-            .join(PortfolioCompany, Deal.company_id == PortfolioCompany.id)
-            .where(Deal.announced_date == announced_date)
-        )
-        tier2_fuzzy_result = await session.execute(tier2_fuzzy_stmt)
-        tier2_fuzzy_candidates = tier2_fuzzy_result.all()
-
-        for deal, company in tier2_fuzzy_candidates:
-            if company_names_match(company_name, company.name):
-                logger.info(
-                    f"Found same-day duplicate (TIER 2 fuzzy): '{company_name}' matches '{company.name}' "
-                    f"(deal #{deal.id}, {deal.round_type}, {deal.amount}, date={deal.announced_date})"
+        # NOTE: Can't move fuzzy logic to SQL, but limit candidates with basic ILIKE filter
+        if announced_date is not None:  # Only query if we have a date to filter on
+            # Pre-filter with case-insensitive substring match to reduce candidates
+            tier2_fuzzy_stmt = (
+                select(Deal, PortfolioCompany)
+                .join(PortfolioCompany, Deal.company_id == PortfolioCompany.id)
+                .where(Deal.announced_date == announced_date)
+                .where(
+                    sa.or_(
+                        sa.func.lower(PortfolioCompany.name).like(f"%{company_name.lower()[:10]}%"),
+                        sa.func.lower(PortfolioCompany.name).like(f"%{company_name.lower()[-10:]}%")
+                    )
                 )
-                return deal
+                .limit(50)  # Safety limit to prevent huge loads
+            )
+            tier2_fuzzy_result = await session.execute(tier2_fuzzy_stmt)
+            tier2_fuzzy_candidates = tier2_fuzzy_result.all()
+
+            for deal, company in tier2_fuzzy_candidates:
+                if company_names_match(company_name, company.name):
+                    logger.info(
+                        f"Found same-day duplicate (TIER 2 fuzzy): '{company_name}' matches '{company.name}' "
+                        f"(deal #{deal.id}, {deal.round_type}, {deal.amount}, date={deal.announced_date})"
+                    )
+                    return deal
 
     # =========================================================================
     # TIER 2.5: Same company + same round + date within 30 days
@@ -1306,16 +1316,30 @@ async def save_deal(
     # FIX: Use 16 hex chars (64 bits) and mask to signed 64-bit range for better distribution
     # Previous [:15] & 0x7FFFFFFF wasted 33 bits of the bigint range
     lock_id = int(hashlib.md5(company_name_normalized.encode()).hexdigest()[:16], 16) & 0x7FFFFFFFFFFFFFFF
-    try:
-        # FIX: Use parameterized query to prevent SQL injection
-        # Using f-string with text() is a security vulnerability if pattern is copied
-        await session.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": lock_id})
-        logger.debug(f"Acquired advisory lock for {extraction.startup_name} (lock_id={lock_id})")
-    except Exception as e:
-        # FIX 2026-01: Re-raise to fail the operation instead of continuing without lock
-        # Continuing without lock defeats the race condition fix and can cause duplicates
-        logger.error(f"Failed to acquire advisory lock for {extraction.startup_name}: {e}")
-        raise RuntimeError(f"Advisory lock acquisition failed for {extraction.startup_name}") from e
+
+    # FIX 2026-02: Retry advisory lock with exponential backoff + jitter to handle transient contention
+    import random
+    lock_acquired = False
+    for attempt in range(3):
+        try:
+            # FIX: Use parameterized query to prevent SQL injection
+            # Using f-string with text() is a security vulnerability if pattern is copied
+            await session.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": lock_id})
+            logger.debug(f"Acquired advisory lock for {extraction.startup_name} (lock_id={lock_id}, attempt={attempt + 1})")
+            lock_acquired = True
+            break
+        except Exception as e:
+            if attempt < 2:  # Retry on first 2 attempts
+                delay = 0.1 * (2 ** attempt) * random.uniform(0.9, 1.1)
+                logger.warning(f"Advisory lock attempt {attempt + 1} failed for {extraction.startup_name}, retrying in {delay:.2f}s: {e}")
+                await asyncio.sleep(delay)
+            else:
+                # Final attempt failed - raise error
+                logger.error(f"Failed to acquire advisory lock for {extraction.startup_name} after 3 attempts: {e}")
+                raise RuntimeError(f"Advisory lock acquisition failed for {extraction.startup_name} after 3 attempts") from e
+
+    if not lock_acquired:
+        raise RuntimeError(f"Advisory lock acquisition failed for {extraction.startup_name}")
 
     # Determine announced_date for duplicate check
     # FIX: Improved date validation to prevent wrong dates

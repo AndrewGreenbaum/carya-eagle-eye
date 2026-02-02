@@ -2557,39 +2557,7 @@ async def run_techcrunch_scraper_endpoint(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-class FortuneResponse(BaseModel):
-    articles_found: int
-    funding_articles: int
-
-
-@app.post("/scrapers/fortune", response_model=FortuneResponse)
-async def run_fortune_scraper_endpoint(
-    hours_back: int = Query(168, ge=1, le=720, description="Hours to look back (default 7 days)"),
-    api_key: str = Depends(verify_api_key),
-):
-    """
-    Run Fortune Term Sheet RSS scraper.
-
-    Fetches deal-focused content from Fortune's Term Sheet newsletter feed.
-    One of the best curated sources for funding news.
-    FREE - no API key required.
-    """
-    from .harvester.scrapers.fortune_term_sheet import FortuneTermSheetScraper
-
-    try:
-        async with FortuneTermSheetScraper() as scraper:
-            articles = await scraper.scrape_all(hours_back=hours_back)
-
-        cache.invalidate("deals")
-
-        return FortuneResponse(
-            articles_found=len(articles),
-            funding_articles=len([a for a in articles if a.fund_slug]),
-        )
-
-    except Exception as e:
-        logger.error("Request failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+# Fortune Term Sheet scraper REMOVED (disabled Dec 2024, 14+ months dead)
 
 
 class GoogleNewsResponse(BaseModel):
@@ -3353,128 +3321,11 @@ async def ingest_crunchbase_deals_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ----- VentureBeat -----
+# VentureBeat scraper REMOVED (disabled Dec 2025, feeds blocked)
 
-class VentureBeatResponse(BaseModel):
-    feeds_scraped: int
-    articles_found: int
-    funding_articles: int
-    fund_matches: int
+# Axios Pro Rata scraper REMOVED (disabled Dec 2025, feeds return 404)
 
-
-@app.post("/scrapers/venturebeat", response_model=VentureBeatResponse)
-async def run_venturebeat_endpoint(
-    hours_back: int = Query(168, ge=1, le=720, description="Hours to look back (default 7 days)"),
-    api_key: str = Depends(verify_api_key),
-):
-    """
-    Run VentureBeat scraper.
-
-    Leading tech publication with strong AI and enterprise coverage.
-    Excellent for AI/ML startup funding news.
-    FREE - uses public RSS feeds.
-    """
-    from .harvester.scrapers.venturebeat import VentureBeatScraper
-
-    try:
-        async with VentureBeatScraper() as scraper:
-            articles = await scraper.scrape_all(hours_back=hours_back)
-
-        fund_matches = len([a for a in articles if a.fund_slug])
-
-        return VentureBeatResponse(
-            feeds_scraped=4,  # ai + business + funding + games
-            articles_found=len(articles),
-            funding_articles=len(articles),
-            fund_matches=fund_matches,
-        )
-
-    except Exception as e:
-        logger.error("Request failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-# ----- Axios Pro Rata -----
-
-class AxiosProRataResponse(BaseModel):
-    feeds_scraped: int
-    articles_found: int
-    funding_articles: int
-    fund_matches: int
-
-
-@app.post("/scrapers/axios-prorata", response_model=AxiosProRataResponse)
-async def run_axios_prorata_endpoint(
-    hours_back: int = Query(168, ge=1, le=720, description="Hours to look back (default 7 days)"),
-    api_key: str = Depends(verify_api_key),
-):
-    """
-    Run Axios Pro Rata scraper.
-
-    Dan Primack's legendary VC newsletter.
-    One of the most respected sources for VC/PE deal news.
-    FREE - uses public RSS feeds (if available).
-    NOTE: Axios RSS may be deprecated - deals captured via Brave Search fallback.
-    """
-    from .harvester.scrapers.axios_prorata import AxiosProRataScraper
-
-    try:
-        async with AxiosProRataScraper() as scraper:
-            articles = await scraper.scrape_all(hours_back=hours_back)
-
-        fund_matches = len([a for a in articles if a.fund_slug])
-
-        return AxiosProRataResponse(
-            feeds_scraped=3,  # prorata + technology + deals
-            articles_found=len(articles),
-            funding_articles=len(articles),
-            fund_matches=fund_matches,
-        )
-
-    except Exception as e:
-        logger.error("Request failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-# ----- StrictlyVC -----
-
-class StrictlyVCResponse(BaseModel):
-    feeds_scraped: int
-    articles_found: int
-    funding_articles: int
-    fund_matches: int
-
-
-@app.post("/scrapers/strictlyvc", response_model=StrictlyVCResponse)
-async def run_strictlyvc_endpoint(
-    hours_back: int = Query(168, ge=1, le=720, description="Hours to look back (default 7 days)"),
-    api_key: str = Depends(verify_api_key),
-):
-    """
-    Run StrictlyVC scraper.
-
-    Connie Loizos' highly respected VC newsletter.
-    One of the best sources for VC funding news.
-    FREE - uses public RSS feed.
-    """
-    from .harvester.scrapers.strictlyvc import StrictlyVCScraper
-
-    try:
-        async with StrictlyVCScraper() as scraper:
-            articles = await scraper.scrape_all(hours_back=hours_back)
-
-        fund_matches = len([a for a in articles if a.fund_slug])
-
-        return StrictlyVCResponse(
-            feeds_scraped=1,  # main feed
-            articles_found=len(articles),
-            funding_articles=len(articles),
-            fund_matches=fund_matches,
-        )
-
-    except Exception as e:
-        logger.error("Request failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+# StrictlyVC scraper REMOVED (disabled April 2020, 5+ years dead)
 
 
 # ----- PR Wire RSS (PRNewswire, GlobeNewswire) -----

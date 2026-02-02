@@ -397,7 +397,7 @@ async def process_articles_batched(
         for result in batch_results:
             if isinstance(result, Exception):
                 batch_errors += 1
-                logger.debug(f"[{source_name}] Batch {batch_num} exception: {result}")
+                logger.error(f"[{source_name}] Batch {batch_num} exception: {result}", exc_info=result)
             elif result:  # Truthy result means deal saved
                 batch_deals += 1
 
@@ -405,6 +405,10 @@ async def process_articles_batched(
         stats["deals_saved"] += batch_deals
         stats["errors"] += batch_errors
         stats["batches_completed"] += 1
+
+        # Alert on high batch failure rate
+        if batch_errors > len(batch) * 0.5:  # >50% failures
+            logger.error(f"BATCH_FAILURE_ALERT: [{source_name}] {batch_errors}/{len(batch)} failed in batch {batch_num}")
 
         logger.info(
             f"[{source_name}] Batch {batch_num}/{total_batches}: "
@@ -970,7 +974,7 @@ async def enrich_new_deals(limit: int = 25):
             # This prevents re-enriching the same deals on every scan (80% cost reduction after initial pass)
             deals = []
             for d in deals_raw:
-                has_website = d.company and d.company.website_url
+                has_website = d.company and d.company.website
                 has_linkedin = d.founders_json and d.founders_json != "[]" and "linkedin.com" in d.founders_json
 
                 if not has_website or not has_linkedin:
@@ -2539,6 +2543,18 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             f"amount_flagged={extraction_filter_stats['amount_flagged_for_review']}"
         )
 
+    # Log Sonnet hybrid extraction ROI (2026-02 cost audit)
+    sonnet_attempts = extraction_filter_stats.get('sonnet_reextract_attempts', 0)
+    if sonnet_attempts > 0:
+        sonnet_improved = extraction_filter_stats.get('sonnet_improved', 0)
+        sonnet_wasted = extraction_filter_stats.get('sonnet_wasted', 0)
+        hit_rate = (sonnet_improved / sonnet_attempts * 100) if sonnet_attempts > 0 else 0
+        logger.info(
+            f"SONNET_HIT_RATE: {sonnet_improved}/{sonnet_attempts} improved ({hit_rate:.1f}%), "
+            f"{sonnet_wasted} wasted | "
+            f"{'✅ KEEP' if hit_rate >= 30 else '⚠️ CONSIDER DISABLING (< 30% hit rate)'}"
+        )
+
     logger.info(f"External sources complete: {total_deals_saved} total deals saved")
 
     return results
@@ -2676,7 +2692,7 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
             results = await scrape_all_funds(
                 fund_slugs=fund_slugs,
                 parallel=True,
-                max_parallel_funds=3,
+                max_parallel_funds=8,  # Increased from 3 for 3x faster Phase 1 (30s → 10s)
                 scan_job_id=scan_job_db_id,
             )
 
@@ -2965,7 +2981,7 @@ def setup_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(
         timezone="America/New_York",
         job_defaults={
-            "coalesce": False,  # Queue missed runs instead of dropping them
+            "coalesce": True,  # Drop queued runs to prevent back-to-back execution
             "max_instances": 1,  # Only one instance at a time
             "misfire_grace_time": 600,  # 10 min grace for misfires (allows long runs)
         }
