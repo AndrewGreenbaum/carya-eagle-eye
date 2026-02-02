@@ -93,6 +93,11 @@ class Settings(BaseSettings):
     brave_search_rate_limit_delay: float = 0.3
     brave_search_backoff_base: float = 2.0  # Exponential backoff base
 
+    # Brave API Cost Control (2026-02)
+    brave_daily_query_budget: int = 400  # ~$4.40/day = ~$130/month (safety margin from $90 target)
+    brave_monthly_cost_alert: float = 60.0  # Alert if trending over $60/month
+    brave_cost_per_query: float = 0.011  # Current Brave API pricing
+
     # Deduplication
     similarity_threshold: float = 0.95
     dedup_window_days: int = 7

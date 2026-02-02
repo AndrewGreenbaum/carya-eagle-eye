@@ -138,6 +138,8 @@ class BraveClient:
         self.rate_limit_delay = settings.brave_search_rate_limit_delay
         self.backoff_base = settings.brave_search_backoff_base
         self._client: Optional[httpx.AsyncClient] = None
+        self._daily_query_count: int = 0  # In-memory counter (resets on process restart)
+        self._last_budget_warning: Optional[str] = None  # Track last warning date
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client."""
@@ -164,6 +166,69 @@ class BraveClient:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
+
+    async def _record_usage(self, query_type: str, count: int = 1) -> None:
+        """
+        Record Brave API usage for cost monitoring.
+
+        Args:
+            query_type: Type of query (scraping, enrichment_website, enrichment_linkedin, enrichment_date)
+            count: Number of queries (default: 1)
+
+        COST FIX 2026-02: Track all Brave API calls to prevent cost overruns.
+        Target: <400 queries/day (~$4.40/day = ~$130/month)
+        Actual: Was 777 queries/day (~$8.55/day = ~$256/month) before optimization
+        """
+        try:
+            from datetime import date as date_type
+            from ..archivist.database import get_session
+            from ..archivist.models import BraveAPIUsage
+            from sqlalchemy import select
+
+            today = date_type.today()
+            estimated_cost = count * settings.brave_cost_per_query
+
+            # Update in-memory counter
+            self._daily_query_count += count
+
+            # Check daily budget (log warning but don't block)
+            if self._daily_query_count >= settings.brave_daily_query_budget:
+                today_str = today.isoformat()
+                if self._last_budget_warning != today_str:
+                    logger.warning(
+                        f"BRAVE_BUDGET_EXCEEDED: Daily query budget reached "
+                        f"({self._daily_query_count}/{settings.brave_daily_query_budget} queries, "
+                        f"~${self._daily_query_count * settings.brave_cost_per_query:.2f})"
+                    )
+                    self._last_budget_warning = today_str
+
+            # Persist to database (aggregate by usage_date + query_type)
+            async with get_session() as db:
+                # Try to update existing record for today + query_type
+                stmt = select(BraveAPIUsage).where(
+                    BraveAPIUsage.usage_date == today,
+                    BraveAPIUsage.query_type == query_type
+                )
+                result = await db.execute(stmt)
+                existing = result.scalar_one_or_none()
+
+                if existing:
+                    existing.query_count += count
+                    existing.estimated_cost += estimated_cost
+                else:
+                    usage = BraveAPIUsage(
+                        usage_date=today,
+                        query_type=query_type,
+                        query_count=count,
+                        estimated_cost=estimated_cost
+                    )
+                    db.add(usage)
+
+                await db.commit()
+
+        except Exception as e:
+            # Don't fail the request if usage tracking fails
+            logger.warning(f"Failed to record Brave API usage: {e}")
 
     def validate_api_key(self) -> bool:
         """Check if API key is configured."""
@@ -274,6 +339,7 @@ class BraveClient:
         count: int = 20,
         freshness: str = "pw",
         use_cache: bool = False,
+        query_type: str = "scraping",
     ) -> Optional[Dict[str, Any]]:
         """
         Execute news search on Brave API.
@@ -283,6 +349,7 @@ class BraveClient:
             count: Number of results (max 100)
             freshness: pd=past day, pw=past week, pm=past month
             use_cache: If True, check/store in TTL cache
+            query_type: Usage type for cost tracking (scraping, enrichment_website, enrichment_linkedin, enrichment_date)
 
         Returns:
             Raw API response or None on failure
@@ -303,6 +370,10 @@ class BraveClient:
         }
         result = await self.request(BRAVE_NEWS_API, params)
 
+        # Record usage (only if successful and not from cache)
+        if result is not None:
+            await self._record_usage(query_type=query_type, count=1)
+
         # Store in cache
         if use_cache and result is not None:
             await _query_cache.set(query, "news", freshness, result, count)
@@ -315,6 +386,7 @@ class BraveClient:
         count: int = 20,
         freshness: Optional[str] = None,
         use_cache: bool = False,
+        query_type: str = "scraping",
     ) -> Optional[Dict[str, Any]]:
         """
         Execute web search on Brave API.
@@ -324,6 +396,7 @@ class BraveClient:
             count: Number of results (max 100)
             freshness: Optional - pd=past day, pw=past week, pm=past month
             use_cache: If True, check/store in TTL cache
+            query_type: Usage type for cost tracking (scraping, enrichment_website, enrichment_linkedin, enrichment_date)
 
         Returns:
             Raw API response or None on failure
@@ -347,6 +420,10 @@ class BraveClient:
             params["freshness"] = freshness
 
         result = await self.request(BRAVE_WEB_API, params)
+
+        # Record usage (only if successful and not from cache)
+        if result is not None:
+            await self._record_usage(query_type=query_type, count=1)
 
         # Store in cache
         if use_cache and result is not None:

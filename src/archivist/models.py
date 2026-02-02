@@ -574,3 +574,33 @@ class ContentHash(SQLModel, table=True):
     expires_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), index=True)
     )  # created_at + 30 days
+
+
+class BraveAPIUsage(SQLModel, table=True):
+    """
+    Track Brave API query usage for cost monitoring.
+
+    Cost: ~$0.011 per query (as of 2026-01)
+    Target: <400 queries/day (~$4.40/day = ~$130/month)
+
+    Query types:
+    - scraping: Fund + partner queries during scheduled scrapes
+    - enrichment_website: Website discovery during enrichment
+    - enrichment_linkedin: LinkedIn profile searches during enrichment
+    - enrichment_date: Date verification via news search
+
+    Usage:
+        Daily budget check: SELECT SUM(query_count) FROM brave_api_usage
+        WHERE usage_date = CURRENT_DATE
+
+        Weekly cost: SELECT SUM(estimated_cost) FROM brave_api_usage
+        WHERE usage_date >= CURRENT_DATE - INTERVAL '7 days'
+    """
+    __tablename__ = "brave_api_usage"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    usage_date: date = Field(index=True)  # Date of query execution (renamed from 'date' to avoid conflicts)
+    query_type: str = Field(max_length=50)  # scraping, enrichment_website, enrichment_linkedin, enrichment_date
+    query_count: int = Field(default=1)  # Number of queries
+    estimated_cost: float = Field(default=0.011)  # Cost in USD (query_count * $0.011)
+    created_at: datetime = Field(default_factory=utc_now_naive)

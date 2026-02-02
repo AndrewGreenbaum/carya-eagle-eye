@@ -964,7 +964,19 @@ async def enrich_new_deals(limit: int = 25):
             )
 
             result = await db.execute(query)
-            deals = result.scalars().all()
+            deals_raw = result.scalars().all()
+
+            # COST FIX 2026-02: Skip deals that already have both website + LinkedIn
+            # This prevents re-enriching the same deals on every scan (80% cost reduction after initial pass)
+            deals = []
+            for d in deals_raw:
+                has_website = d.company and d.company.website_url
+                has_linkedin = d.founders_json and d.founders_json != "[]" and "linkedin.com" in d.founders_json
+
+                if not has_website or not has_linkedin:
+                    deals.append(d)
+                else:
+                    logger.debug(f"Skipping {d.company_name} - already enriched (website + LinkedIn)")
 
             if not deals:
                 logger.info("No deals needing enrichment")
@@ -1177,7 +1189,27 @@ async def enrich_deal_dates(limit: int = 50) -> int:
             )
 
             result = await db.execute(query)
-            deals = result.scalars().all()
+            deals_raw = result.scalars().all()
+
+            # COST FIX 2026-02: Skip deals with valid dates (only enrich placeholder dates)
+            # This prevents re-enriching deals with already-good dates (90% cost reduction after initial pass)
+            deals = []
+            for d in deals_raw:
+                # Skip if has high-confidence date
+                if d.announced_date and d.date_confidence >= 0.7:
+                    continue
+
+                # Skip if date is not a placeholder (Jan 1 or quarter-start)
+                if d.announced_date:
+                    is_placeholder = (
+                        d.announced_date.day == 1 and d.announced_date.month in [1, 4, 7, 10]
+                    )
+                    if not is_placeholder:
+                        # Has real date, just low confidence - skip to save costs
+                        logger.debug(f"Skipping {d.company_name} - has non-placeholder date ({d.announced_date})")
+                        continue
+
+                deals.append(d)
 
             if not deals:
                 logger.info("No deals needing date enrichment")
@@ -2687,22 +2719,37 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
                 f"total_deals={total_deals}, duration={duration:.1f}s"
             )
 
-            # ===== PHASE 3: Enrich new deals =====
-            # Always run enrichment to catch up on any missing data
-            logger.info(f"[{job_id}] Phase 3: Starting automatic enrichment (website + LinkedIn)")
-            # FIX #6: Increased from 50 to 100 to improve coverage (was taking weeks at 50)
-            enriched = await enrich_new_deals(limit=100)
-            logger.info(f"[{job_id}] Enrichment complete: {enriched} companies updated")
+            # ===== PHASE 3: Enrich new deals (COST OPTIMIZED) =====
+            # Check if should run enrichment (every 3rd scan to reduce Brave API costs)
+            # Cost reduction: 650 queries/scan → ~195 queries/scan at reduced batch sizes
+            # Frequency reduction: 7x/week → 2-3x/week = ~70% cost savings
+            async with get_session() as db:
+                from sqlalchemy import func
+                scan_count = await db.scalar(select(func.count(ScanJob.id)))
 
-            # Manual heartbeat after Phase 3
-            if guard:
-                await guard.heartbeat()
+            should_enrich = (scan_count % 3 == 0)  # Every 3rd scan
 
-            # ===== PHASE 4: Enrich deal dates =====
-            # FIX: Date enrichment was never running - all the code existed but wasn't called
-            logger.info(f"[{job_id}] Phase 4: Starting date enrichment (Brave + SEC verification)")
-            dates_enriched = await enrich_deal_dates(limit=50)
-            logger.info(f"[{job_id}] Date enrichment complete: {dates_enriched} deals updated")
+            if should_enrich:
+                logger.info(f"[{job_id}] Phase 3: Starting automatic enrichment (website + LinkedIn) [every 3rd scan]")
+                # COST FIX 2026-02: Reduced from 100 → 25 to cut Brave API costs
+                # At 100: ~400 queries/scan, At 25: ~100 queries/scan (75% reduction)
+                enriched = await enrich_new_deals(limit=25)
+                logger.info(f"[{job_id}] Enrichment complete: {enriched} companies updated")
+
+                # Manual heartbeat after Phase 3
+                if guard:
+                    await guard.heartbeat()
+
+                # ===== PHASE 4: Enrich deal dates =====
+                logger.info(f"[{job_id}] Phase 4: Starting date enrichment (Brave + SEC verification)")
+                # COST FIX 2026-02: Reduced from 50 → 15 to cut Brave API costs
+                # At 50: ~50 queries/scan, At 15: ~15 queries/scan (70% reduction)
+                dates_enriched = await enrich_deal_dates(limit=15)
+                logger.info(f"[{job_id}] Date enrichment complete: {dates_enriched} deals updated")
+            else:
+                logger.info(f"[{job_id}] Skipping enrichment (runs every 3rd scan, next at scan #{scan_count + (3 - scan_count % 3)})")
+                enriched = 0
+                dates_enriched = 0
 
             # Manual heartbeat after Phase 4
             if guard:

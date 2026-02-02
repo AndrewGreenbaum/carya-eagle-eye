@@ -768,6 +768,7 @@ async def list_deals(
     sort_direction: str = Query("desc", description="Sort by announced date: 'asc' or 'desc'"),
     limit: int = Query(50, ge=1, le=200, description="Max results to return"),
     offset: int = Query(0, ge=0, description="Number of results to skip"),
+    days: Optional[int] = Query(None, ge=1, le=365, description="Filter deals from the last N days"),
 ):
     """
     List tracked deals with pagination.
@@ -816,6 +817,11 @@ async def list_deals(
                 base_stmt = base_stmt.where(Deal.is_enterprise_ai == is_enterprise_ai)
             if enterprise_category:
                 base_stmt = base_stmt.where(Deal.enterprise_category == enterprise_category)
+
+            # Filter by days (deals created in the last N days)
+            if days:
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).replace(tzinfo=None)
+                base_stmt = base_stmt.where(Deal.created_at >= cutoff)
 
             # Filter by fund_slug - join through DealInvestor to Fund
             if fund_slug:
@@ -5195,6 +5201,110 @@ async def get_enrichment_stats(
         return EnrichmentCoverageResponse(**stats)
     except Exception as e:
         logger.error("Request failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+class BraveAPIStatsResponse(BaseModel):
+    """Response model for Brave API usage statistics."""
+    today: dict
+    last_7_days: dict
+    last_30_days: dict
+    daily_budget: int
+    monthly_cost_target: float
+
+
+@app.get("/brave/stats", response_model=BraveAPIStatsResponse)
+async def get_brave_api_stats(
+    api_key: str = Depends(verify_api_key),
+):
+    """
+    Get Brave API usage statistics for cost monitoring.
+
+    Returns:
+    - Today's usage (queries + cost by type)
+    - Last 7 days usage
+    - Last 30 days usage
+    - Budget thresholds
+
+    COST FIX 2026-02: Monitor Brave API costs to prevent overruns.
+    Target: <$130/month (~400 queries/day)
+    """
+    from datetime import date as date_type, timedelta
+    from sqlalchemy import select, func
+    from .archivist.models import BraveAPIUsage
+
+    try:
+        async with get_session() as db:
+            today = date_type.today()
+            seven_days_ago = today - timedelta(days=7)
+            thirty_days_ago = today - timedelta(days=30)
+
+            # Today's stats
+            today_stmt = (
+                select(
+                    BraveAPIUsage.query_type,
+                    func.sum(BraveAPIUsage.query_count).label("total_queries"),
+                    func.sum(BraveAPIUsage.estimated_cost).label("total_cost"),
+                )
+                .where(BraveAPIUsage.usage_date == today)
+                .group_by(BraveAPIUsage.query_type)
+            )
+            today_result = await db.execute(today_stmt)
+            today_stats = {
+                "total_queries": 0,
+                "total_cost": 0.0,
+                "by_type": {}
+            }
+            for row in today_result:
+                today_stats["total_queries"] += row.total_queries
+                today_stats["total_cost"] += row.total_cost
+                today_stats["by_type"][row.query_type] = {
+                    "queries": row.total_queries,
+                    "cost": round(row.total_cost, 2)
+                }
+
+            # Last 7 days stats
+            week_stmt = (
+                select(
+                    func.sum(BraveAPIUsage.query_count).label("total_queries"),
+                    func.sum(BraveAPIUsage.estimated_cost).label("total_cost"),
+                )
+                .where(BraveAPIUsage.usage_date >= seven_days_ago)
+            )
+            week_result = await db.execute(week_stmt)
+            week_row = week_result.one_or_none()
+            week_stats = {
+                "total_queries": week_row.total_queries or 0 if week_row else 0,
+                "total_cost": round(week_row.total_cost or 0.0 if week_row else 0.0, 2),
+                "avg_per_day": round((week_row.total_queries or 0) / 7 if week_row else 0, 1)
+            }
+
+            # Last 30 days stats
+            month_stmt = (
+                select(
+                    func.sum(BraveAPIUsage.query_count).label("total_queries"),
+                    func.sum(BraveAPIUsage.estimated_cost).label("total_cost"),
+                )
+                .where(BraveAPIUsage.usage_date >= thirty_days_ago)
+            )
+            month_result = await db.execute(month_stmt)
+            month_row = month_result.one_or_none()
+            month_stats = {
+                "total_queries": month_row.total_queries or 0 if month_row else 0,
+                "total_cost": round(month_row.total_cost or 0.0 if month_row else 0.0, 2),
+                "projected_monthly": round((month_row.total_cost or 0.0) * 30 / (today.day) if month_row and today.day > 0 else 0.0, 2)
+            }
+
+            return BraveAPIStatsResponse(
+                today=today_stats,
+                last_7_days=week_stats,
+                last_30_days=month_stats,
+                daily_budget=settings.brave_daily_query_budget,
+                monthly_cost_target=settings.brave_monthly_cost_alert,
+            )
+
+    except Exception as e:
+        logger.error("Failed to get Brave API stats: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
