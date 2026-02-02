@@ -3200,6 +3200,27 @@ class CrunchbaseNewsResponse(BaseModel):
     fund_matches: int
 
 
+class VentureBeatResponse(BaseModel):
+    feeds_scraped: int
+    articles_found: int
+    funding_articles: int
+    fund_matches: int
+
+
+class AxiosProRataResponse(BaseModel):
+    feeds_scraped: int
+    articles_found: int
+    funding_articles: int
+    fund_matches: int
+
+
+class StrictlyVCResponse(BaseModel):
+    feeds_scraped: int
+    articles_found: int
+    funding_articles: int
+    fund_matches: int
+
+
 @app.post("/scrapers/crunchbase-news", response_model=CrunchbaseNewsResponse)
 async def run_crunchbase_news_endpoint(
     hours_back: int = Query(168, ge=1, le=720, description="Hours to look back (default 7 days)"),
@@ -3386,7 +3407,6 @@ class AllSourcesResponse(BaseModel):
     google_alerts: Optional[GoogleAlertsResponse] = None
     twitter: Optional[TwitterMonitorResponse] = None
     techcrunch: Optional[TechCrunchResponse] = None
-    fortune: Optional[FortuneResponse] = None
     ycombinator: Optional[YCombinatorResponse] = None
     github_trending: Optional[GitHubTrendingResponse] = None
     hackernews: Optional[HackerNewsResponse] = None
@@ -3542,18 +3562,6 @@ async def run_all_sources(
         )
     except Exception:
         results["techcrunch"] = None
-
-    # Fortune Term Sheet (always runs - free)
-    try:
-        from .harvester.scrapers.fortune_term_sheet import FortuneTermSheetScraper
-        async with FortuneTermSheetScraper() as scraper:
-            articles = await scraper.scrape_all(hours_back=days * 24)
-        results["fortune"] = FortuneResponse(
-            articles_found=len(articles),
-            funding_articles=len([a for a in articles if a.fund_slug]),
-        )
-    except Exception:
-        results["fortune"] = None
 
     # Y Combinator (always runs - free)
     try:
