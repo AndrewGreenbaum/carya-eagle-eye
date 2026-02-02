@@ -94,7 +94,7 @@ export function TrackerColumn({
         ref={setNodeRef}
         role="region"
         aria-label={`${column.displayName} column, ${count} items`}
-        className={`flex-1 transition-colors ${
+        className={`flex-1 min-h-[200px] transition-colors ${
           isOver ? 'outline outline-1 outline-emerald-500/20 rounded' : ''
         }`}
       >
@@ -102,7 +102,7 @@ export function TrackerColumn({
           items={items.map((i) => i.id)}
           strategy={verticalListSortingStrategy}
         >
-          <div className="flex flex-col">
+          <div className="flex flex-col min-h-[200px]">
             {items.map((item, idx) => (
               <TrackerCard
                 key={item.id}
@@ -116,7 +116,7 @@ export function TrackerColumn({
 
         {/* Empty State */}
         {items.length === 0 && (
-          <div className="py-10">
+          <div className="flex items-center justify-center min-h-[200px]">
             <span className="text-xs text-zinc-800">Drop here</span>
           </div>
         )}
