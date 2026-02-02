@@ -284,7 +284,8 @@ new Date(y, m-1, d);
 - **Comprehensive logging:** All drag events, errors, and state transitions logged
 - **Better error messages:** Specific messages for 404/403/network errors (5s timeout instead of 3s)
 - **TypeScript enum:** TrackerColumnSlug prevents typos in column references
-- **Empty column fix:** Empty columns have `min-h-[200px]` to ensure sufficient drop surface area. Without minimum height, collision detection fails on empty columns (0px height). The SortableContext with empty items array collapses, so minimum height is critical. Empty state "Drop here" text is centered using flex layout.
+- **Empty column fix (batch 1):** Conditional SortableContext - only renders when `items.length > 0`. Empty columns show "Drop here" message without wrapping SortableContext, reducing DOM complexity.
+- **Empty column fix (batch 2):** Custom collision detection algorithm - uses `pointerWithin` → `rectIntersection` → `closestCorners` cascade. The default `closestCorners` algorithm fails on tall empty columns because it measures corner-to-corner distance (card corners far from 1660px tall column corners). `pointerWithin` checks "is pointer inside zone?" which works perfectly for empty columns. Falls back to other algorithms for fine-grained card positioning.
 
 ## Development
 

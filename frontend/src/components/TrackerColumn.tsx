@@ -98,24 +98,23 @@ export function TrackerColumn({
           isOver ? 'outline outline-1 outline-emerald-500/20 rounded' : ''
         }`}
       >
-        <SortableContext
-          items={items.map((i) => i.id)}
-          strategy={verticalListSortingStrategy}
-        >
-          <div className="flex flex-col min-h-[200px]">
-            {items.map((item, idx) => (
-              <TrackerCard
-                key={item.id}
-                item={item}
-                isSelected={selectedIndex === idx}
-                onClick={() => onEditItem(item)}
-              />
-            ))}
-          </div>
-        </SortableContext>
-
-        {/* Empty State */}
-        {items.length === 0 && (
+        {items.length > 0 ? (
+          <SortableContext
+            items={items.map((i) => i.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            <div className="flex flex-col">
+              {items.map((item, idx) => (
+                <TrackerCard
+                  key={item.id}
+                  item={item}
+                  isSelected={selectedIndex === idx}
+                  onClick={() => onEditItem(item)}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        ) : (
           <div className="flex items-center justify-center min-h-[200px]">
             <span className="text-xs text-zinc-800">Drop here</span>
           </div>

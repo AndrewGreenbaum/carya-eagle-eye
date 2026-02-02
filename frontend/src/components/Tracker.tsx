@@ -13,6 +13,8 @@ import {
   DndContext,
   DragOverlay,
   closestCorners,
+  pointerWithin,
+  rectIntersection,
   KeyboardSensor,
   PointerSensor,
   useSensor,
@@ -74,6 +76,24 @@ export function Tracker() {
       coordinateGetter: sortableKeyboardCoordinates,
     })
   );
+
+  // Custom collision detection: prioritize pointer-based detection for better empty column support
+  const customCollisionDetection = (args: any) => {
+    // First try pointerWithin - best for empty columns and intuitive UX
+    const pointerCollisions = pointerWithin(args);
+    if (pointerCollisions) {
+      return pointerCollisions;
+    }
+
+    // Then try rectIntersection - good for overlapping drops
+    const intersectionCollisions = rectIntersection(args);
+    if (intersectionCollisions) {
+      return intersectionCollisions;
+    }
+
+    // Finally fall back to closestCorners for fine-grained positioning
+    return closestCorners(args);
+  };
 
   const loadColumns = useCallback(async () => {
     try {
@@ -644,7 +664,7 @@ export function Tracker() {
       <div className="flex-1 min-h-0 overflow-auto px-6 sm:px-12 pb-12">
         <DndContext
           sensors={isLoading ? [] : sensors}
-          collisionDetection={closestCorners}
+          collisionDetection={customCollisionDetection}
           onDragStart={handleDragStart}
           onDragOver={handleDragOver}
           onDragEnd={handleDragEnd}
