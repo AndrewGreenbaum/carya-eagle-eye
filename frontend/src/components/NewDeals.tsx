@@ -1,6 +1,6 @@
 /**
- * NewDeals - Shows companies from the most recent scan
- * Each unseen deal has a slowly flashing grey dot that disappears on hover/keyboard selection
+ * NewDeals - Shows unseen deals from the last 30 days
+ * Each unseen deal has a slowly flashing blue dot that disappears on hover/keyboard selection
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -10,25 +10,21 @@ const API_KEY = import.meta.env.VITE_API_KEY || 'dev-key';
 
 const SEEN_KEY = 'carya-seen-deals';
 
-interface ScanDeal {
-  id: string;
+interface Deal {
+  id: number;
   startup_name: string;
   round_type: string;
-  amount?: string;
+  amount_usd?: number;
   lead_investor?: string;
   is_lead: boolean;
   is_enterprise_ai: boolean;
   enterprise_category?: string;
-  source_name?: string;
+  created_at: string;
 }
 
-interface Scan {
-  id: number;
-  started_at: string;
-  completed_at?: string;
-  status: string;
-  total_deals_saved: number;
-  deals?: ScanDeal[];
+interface DealsResponse {
+  deals: Deal[];
+  total: number;
 }
 
 function getSeen(): Set<string> {
@@ -57,40 +53,35 @@ function isLikelyFundName(name: string): boolean {
   return false;
 }
 
+function formatAmount(amount: number | undefined): string {
+  if (!amount) return '';
+  if (amount >= 1_000_000_000) return `$${(amount / 1_000_000_000).toFixed(1)}B`;
+  if (amount >= 1_000_000) return `$${(amount / 1_000_000).toFixed(0)}M`;
+  if (amount >= 1_000) return `$${(amount / 1_000).toFixed(0)}K`;
+  return `$${amount}`;
+}
+
 export function NewDeals() {
-  const [deals, setDeals] = useState<ScanDeal[]>([]);
-  const [scanTime, setScanTime] = useState<string>('');
+  const [deals, setDeals] = useState<Deal[]>([]);
   const [seen, setSeen] = useState<Set<string>>(getSeen);
   const [selectedIdx, setSelectedIdx] = useState(-1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const loadLatestScan = useCallback(async () => {
+  const loadDeals = useCallback(async () => {
     try {
-      // Get the most recent completed scan
-      const listRes = await fetch(`${API_BASE}/scans?page=1&limit=5`, {
+      const res = await fetch(`${API_BASE}/deals?days=30&limit=200`, {
         headers: { 'X-API-Key': API_KEY },
       });
-      if (!listRes.ok) throw new Error('Failed to fetch scans');
-      const listData = await listRes.json();
-      const completedScan = listData.scans?.find((s: Scan) => s.status === 'success' && s.total_deals_saved > 0);
-      if (!completedScan) {
-        setDeals([]);
-        return;
-      }
+      if (!res.ok) throw new Error('Failed to fetch deals');
+      const data: DealsResponse = await res.json();
 
-      // Get scan details with deals
-      const detailRes = await fetch(`${API_BASE}/scans/${completedScan.id}`, {
-        headers: { 'X-API-Key': API_KEY },
-      });
-      if (!detailRes.ok) throw new Error('Failed to fetch scan details');
-      const detail: Scan = await detailRes.json();
-      // Filter out false positives (fund names extracted as company names)
-      const filteredDeals = (detail.deals || []).filter(
-        (d: ScanDeal) => !isLikelyFundName(d.startup_name)
-      );
-      setDeals(filteredDeals);
-      setScanTime(detail.completed_at || detail.started_at);
+      // Filter out seen deals and fund names
+      const unseenDeals = (data.deals || [])
+        .filter((d: Deal) => !getSeen().has(String(d.id)))
+        .filter((d: Deal) => !isLikelyFundName(d.startup_name));
+
+      setDeals(unseenDeals);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load');
     } finally {
@@ -98,9 +89,12 @@ export function NewDeals() {
     }
   }, []);
 
+  // Initial load + 5-minute polling
   useEffect(() => {
-    loadLatestScan();
-  }, [loadLatestScan]);
+    loadDeals();
+    const interval = setInterval(loadDeals, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [loadDeals]);
 
   const markSeen = useCallback((dealId: string) => {
     setSeen((prev) => {
@@ -110,7 +104,16 @@ export function NewDeals() {
       saveSeen(next);
       return next;
     });
+    // Remove the deal from the list
+    setDeals((prev) => prev.filter((d) => String(d.id) !== dealId));
   }, []);
+
+  const markAllSeen = useCallback(() => {
+    const allIds = new Set([...seen, ...deals.map((d) => String(d.id))]);
+    saveSeen(allIds);
+    setSeen(allIds);
+    setDeals([]);
+  }, [deals, seen]);
 
   // Keyboard navigation
   useEffect(() => {
@@ -124,14 +127,14 @@ export function NewDeals() {
         e.preventDefault();
         setSelectedIdx((prev) => {
           const next = prev < deals.length - 1 ? prev + 1 : prev;
-          if (next >= 0 && deals[next]) markSeen(deals[next].id);
+          if (next >= 0 && deals[next]) markSeen(String(deals[next].id));
           return next;
         });
       } else if (e.key === 'k' || e.key === 'ArrowUp') {
         e.preventDefault();
         setSelectedIdx((prev) => {
           const next = prev > 0 ? prev - 1 : 0;
-          if (deals[next]) markSeen(deals[next].id);
+          if (deals[next]) markSeen(String(deals[next].id));
           return next;
         });
       } else if (e.key === 'Escape') {
@@ -142,24 +145,26 @@ export function NewDeals() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [deals, markSeen]);
 
-  const formatScanTime = (iso: string) => {
-    try {
-      const d = new Date(iso);
-      return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-    } catch {
-      return '';
-    }
-  };
+  const unseenCount = deals.length;
 
   return (
     <div className="flex flex-col flex-1 min-h-0 font-sans">
       {/* Header */}
       <div className="flex items-baseline justify-between px-6 sm:px-12 pt-10 sm:pt-12 pb-8 sm:pb-10">
         <h1 className="text-sm font-semibold text-zinc-200 tracking-[-0.02em]">New</h1>
-        <span className="text-xs text-zinc-600">
-          {scanTime && `Last scan ${formatScanTime(scanTime)}`}
-          {deals.length > 0 && ` \u00b7 ${deals.length} companies`}
-        </span>
+        <div className="flex items-center gap-4">
+          {unseenCount > 0 && (
+            <button
+              onClick={markAllSeen}
+              className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+            >
+              Mark all seen
+            </button>
+          )}
+          <span className="text-xs text-zinc-600">
+            {unseenCount > 0 ? `${unseenCount} unseen` : 'All caught up'}
+          </span>
+        </div>
       </div>
 
       {error && (
@@ -169,11 +174,10 @@ export function NewDeals() {
       {/* Deals list */}
       <div className="flex-1 min-h-0 overflow-auto px-6 sm:px-12 pb-12">
         {deals.length === 0 && !error && !loading && (
-          <div className="text-xs text-zinc-700 pt-4">No new companies from the latest scan.</div>
+          <div className="text-xs text-zinc-700 pt-4">No unseen deals from the last 30 days.</div>
         )}
         <div className="flex flex-col">
           {deals.map((deal, idx) => {
-            const isUnseen = !seen.has(deal.id);
             const isSelected = selectedIdx === idx;
             return (
               <div
@@ -181,16 +185,14 @@ export function NewDeals() {
                 className={`flex items-center gap-3 py-4 px-2 -mx-1 border-b border-zinc-800/40 rounded-md transition-[background] duration-75 cursor-default ${
                   isSelected ? 'bg-zinc-800/15' : 'hover:bg-zinc-800/15'
                 }`}
-                onClick={() => markSeen(deal.id)}
+                onClick={() => markSeen(String(deal.id))}
               >
                 {/* Flashing dot */}
                 <div className="w-4 shrink-0 flex justify-center">
-                  {isUnseen && (
-                    <div
-                      className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"
-                      style={{ animationDuration: '3s' }}
-                    />
-                  )}
+                  <div
+                    className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"
+                    style={{ animationDuration: '3s' }}
+                  />
                 </div>
 
                 {/* Company info */}
@@ -199,9 +201,9 @@ export function NewDeals() {
                     <span className="text-[15px] font-semibold text-zinc-50 tracking-[-0.02em] truncate">
                       {deal.startup_name}
                     </span>
-                    {deal.amount && (
+                    {deal.amount_usd && (
                       <span className="text-[15px] font-medium tabular-nums text-zinc-400 shrink-0">
-                        {deal.amount}
+                        {formatAmount(deal.amount_usd)}
                       </span>
                     )}
                   </div>
@@ -213,12 +215,6 @@ export function NewDeals() {
                       <>
                         <span className="text-zinc-700">&middot;</span>
                         <span className="text-xs text-zinc-500">{deal.lead_investor}</span>
-                      </>
-                    )}
-                    {deal.source_name && (
-                      <>
-                        <span className="text-zinc-700">&middot;</span>
-                        <span className="text-xs text-zinc-700">{deal.source_name}</span>
                       </>
                     )}
                   </div>

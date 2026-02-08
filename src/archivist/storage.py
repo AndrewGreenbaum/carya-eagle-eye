@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Tuple
+import sqlalchemy as sa
 from sqlalchemy import select, nullslast
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession

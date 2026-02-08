@@ -30,6 +30,7 @@ import { MindMapDocs } from './components/MindMapDocs';
 import { AircraftTracker } from './components/AircraftTracker';
 import { ScansPage } from './components/ScansPage';
 import { PreFundingTab } from './components/PreFundingTab';
+import { CaryaChat } from './components/CaryaChat';
 import {
   fetchDeals,
   fetchFunds,
@@ -595,6 +596,9 @@ function App() {
 
       {/* Settings Panel */}
       <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      {/* Carya AI Chat Widget */}
+      <CaryaChat />
     </div>
   );
 }
