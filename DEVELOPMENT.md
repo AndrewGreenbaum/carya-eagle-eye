@@ -110,11 +110,14 @@ Article → Source Filter → Title Filter → Content Dedup → Keyword Filter 
 12. `_is_background_mention()` - reject non-headline companies (proportional threshold)
 13. `_validate_deal_amount()` - flag suspicious amounts (updated 2025/2026 thresholds)
 
-**Fund structure rejection** (2026-01): Catches SEC Form D filings for LP structures:
+**Fund structure rejection** (2026-01, enhanced 2026-02): Catches SEC Form D filings for LP structures:
 - Names ending with "Fund I/II/.../XVI" (roman numerals)
 - Names ending with "Fund 1/2/.../N" (numbers)
 - Names ending with ", LP" / ", LLC" / ", LLP"
 - Fund codes like "SP-1216 Fund I", "AU-0707 Fund III"
+- **NEW (2026-02):** LLC/LP/LLP without comma + fund indicator words (ventures, capital, partners, holdings, management, advisors, investments, equity, asset, associates, etc.)
+  - Rejects: "Sequoia Growth Partners LP", "ABC Capital Advisors LLC"
+  - Preserves: "CoolAI LLC", "TechStart LP" (no fund indicator words)
 - Safe: "Fundrise", "GoFundMe", "FundBox" (Fund not at end)
 
 **Confidence thresholds:** Default=0.50, External=0.40
@@ -361,6 +364,15 @@ create_scraper_client(user_agent, timeout, ...)
 - `HYBRID_FAILED` / `HYBRID_FAILED_HIGH_CONF` - Sonnet re-extraction errors (falls back to Haiku)
 - `INVALID_CONFIDENCE` - NaN/Inf confidence from LLM (serious parsing failure)
 - `BRAVE_BUDGET_EXCEEDED` - daily Brave API query budget reached (400 queries/day)
+- `STUCK_SCAN_DETECTED` - StuckScanMonitor marked a scan as failed (heartbeat stale)
+
+**Scan heartbeat** (2026-02 fix):
+- `ScanJobGuard` provides heartbeat updates during scan phases
+- Phase 1 (fund scrapers): Manual heartbeat after completion
+- Phase 2 (external sources): Manual heartbeat after Brave Search and SEC Edgar (longest serial sources)
+- Phase 3 (enrichment): Manual heartbeat after completion
+- `StuckScanMonitor`: `STUCK_THRESHOLD=600s` (10 min), checks every 2 min
+- If heartbeat stale for >600s → marks scan as failed with "Process died unexpectedly"
 
 **Cost optimizations:**
 - **LLM (2026-01):**
@@ -384,7 +396,12 @@ create_scraper_client(user_agent, timeout, ...)
 | Dates off by 1 | Use date component parsing |
 | Content hash table missing | Run `alembic upgrade head` (migration: `20260121_content_hashes`) |
 | New tab empty | Check `GET /scans?limit=5` - scans may be failing. Trigger manual: `POST /scheduler/trigger` |
-| Scans stuck/timeout | Check Railway logs for Claude API errors, DB pool exhaustion, or memory issues |
+| Scans stuck/timeout | Fixed 2026-02: Phase 2 heartbeat + STUCK_THRESHOLD=600s. If still occurs, check Railway logs for Claude API errors, DB pool exhaustion, or memory issues |
+| "Process died unexpectedly (heartbeat stale)" | Fixed 2026-02: Periodic heartbeat during Phase 2 parallel scrapers. STUCK_THRESHOLD increased from 300→600s |
+| External scrapers all show "Error" | Likely heartbeat timeout killed scan mid-Phase 2. Fixed 2026-02: heartbeat task runs every 30s during parallel scraper execution |
+| SEC Edgar fund structure leaks | Fixed 2026-02: Enhanced `_validate_startup_not_fund()` catches LLC/LP/LLP + fund indicator words (ventures, capital, partners, etc.) |
+| Duplicate deals in UI | Run `python3 scripts/cleanup_duplicate_deals.py --dry-run` in railway shell. Root cause: Same article scraped multiple times before dedup catches it. Script handles 3 cases: (1) exact duplicates (same company+round+date+amount), (2) null-field duplicates (same company, all fields NULL from incomplete extractions), (3) round-mismatch duplicates (same company+amount, different round type). Keeps oldest deal ID, reassigns articles. |
+| Scan fails with "select not defined" | Fixed 2026-02: Missing import in jobs.py:2743 |
 
 ## Critical Rules
 1. **GV:** NEVER confuse with NYSE:GV stock ticker

@@ -2970,9 +2970,26 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
         )
         return deal
 
-    # NOTE: We intentionally do NOT filter on " LLC" / " LP" without comma
-    # Some real startups file SEC Form D as LLC before converting to C-corp
-    # We'd rather have fund garbage than miss real startups
+    # Filter LLC/LP/LLP WITHOUT comma when name has strong fund indicators
+    # This catches SEC Form D fund structures while preserving real startups
+    # e.g. "Sequoia Growth Partners LP" → rejected, "CoolAI LLC" → passes through
+    FUND_INDICATOR_WORDS = {
+        "ventures", "capital", "partners", "holdings", "management",
+        "advisors", "investments", "equity", "asset", "associates",
+        "group fund", "growth fund", "opportunity", "strategic",
+    }
+    name_lower = name.lower()
+    if re.search(r'\s(llc|lp|llp)$', name, re.IGNORECASE):
+        if any(word in name_lower for word in FUND_INDICATOR_WORDS):
+            logger.warning(
+                f"Rejecting fund entity: '{name}' - ends with LLC/LP/LLP + fund indicator"
+            )
+            increment_extraction_stat("fund_structure_rejected")
+            deal.is_new_announcement = False
+            deal.announcement_rejection_reason = (
+                f"Name looks like fund entity: {name} (ends with legal suffix + fund indicator)"
+            )
+            return deal
 
     # Pattern: fund code format (e.g., "SP-1216 Fund I", "AU-0707 Fund III")
     # SAFE: These are internal fund codes, never startup names

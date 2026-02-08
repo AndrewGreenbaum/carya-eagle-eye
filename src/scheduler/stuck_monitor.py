@@ -9,11 +9,11 @@ FIX 2026-01: Catches failure modes where everything fails:
 
 The monitor runs every 5 minutes and marks jobs as failed if:
 1. status = 'running'
-2. last_heartbeat is older than STUCK_THRESHOLD (2 minutes)
+2. last_heartbeat is older than STUCK_THRESHOLD (10 minutes)
 
-This provides a guaranteed cleanup within 7 minutes of a crash:
+This provides a guaranteed cleanup within 15 minutes of a crash:
 - Up to 5 minutes for monitor cycle
-- Up to 2 minutes for heartbeat to become stale
+- Up to 10 minutes for heartbeat to become stale
 """
 
 import asyncio
@@ -32,9 +32,10 @@ logger = logging.getLogger(__name__)
 MONITOR_INTERVAL = 120  # 2 minutes
 
 # How long without heartbeat before a job is considered stuck (seconds)
-# FIX 2026-01: Increased to 300s (5 min) to avoid false alarms during intensive
-# processing phases. Manual heartbeat() calls in jobs.py ensure updates between phases.
-STUCK_THRESHOLD = 300  # 5 minutes
+# FIX 2026-02: Increased to 600s (10 min). Phase 2 runs 11 parallel scrapers that
+# take 2-5+ min. Periodic heartbeat task now runs during Phase 2, but 600s provides
+# safety buffer for transient DB connection failures during heartbeat updates.
+STUCK_THRESHOLD = 600  # 10 minutes
 
 # Background task reference
 _monitor_task: Optional[asyncio.Task] = None

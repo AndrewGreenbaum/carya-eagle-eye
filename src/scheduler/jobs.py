@@ -1904,7 +1904,7 @@ async def process_stealth_signals(
     return stats
 
 
-async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = None) -> Dict[str, Any]:
+async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = None, guard=None) -> Dict[str, Any]:
     """
     Scrape all external data sources and process through extraction pipeline.
 
@@ -1983,6 +1983,11 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             _circuit_breaker.record_error("brave_search")
     elif _circuit_breaker.is_disabled("brave_search"):
         results["brave_search"] = {"error": "circuit breaker open", "articles_found": 0}
+
+    # Heartbeat after Brave Search (long-running serial source)
+    if guard:
+        await guard.heartbeat()
+        logger.debug("Phase 2: heartbeat after Brave Search")
 
     # 2. SEC EDGAR (free - Form D filings, rate limited)
     # FIX 2026-01: Added 180s timeout (SEC has many filings + rate limiting) + circuit breaker
@@ -2065,6 +2070,11 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             _circuit_breaker.record_error("sec_edgar")
     else:
         results["sec_edgar"] = {"error": "circuit breaker open", "articles_found": 0}
+
+    # Heartbeat after SEC Edgar (long-running serial source)
+    if guard:
+        await guard.heartbeat()
+        logger.debug("Phase 2: heartbeat after SEC Edgar")
 
     # 3. TWITTER (API rate limited)
     # FIX 2026-01: Added 60s timeout
@@ -2713,7 +2723,7 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
             # ===== PHASE 2: Scrape external sources (THE FIX) =====
             logger.info(f"[{job_id}] Phase 2: Scraping external sources (Brave Search, SEC, etc.)")
 
-            external_results = await scrape_external_sources(days=7, scan_job_id=scan_job_db_id)
+            external_results = await scrape_external_sources(days=7, scan_job_id=scan_job_db_id, guard=guard)
             external_deals = external_results.get("total_deals_saved", 0)
 
             logger.info(
@@ -2740,10 +2750,11 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
             # Cost reduction: 650 queries/scan → ~195 queries/scan at reduced batch sizes
             # Frequency reduction: 7x/week → 2-3x/week = ~70% cost savings
             async with get_session() as db:
-                from sqlalchemy import func
+                from sqlalchemy import select, func
                 scan_count = await db.scalar(select(func.count(ScanJob.id)))
 
             should_enrich = (scan_count % 3 == 0)  # Every 3rd scan
+            logger.info(f"[{job_id}] Enrichment check: scan_count={scan_count}, should_enrich={should_enrich}")
 
             if should_enrich:
                 logger.info(f"[{job_id}] Phase 3: Starting automatic enrichment (website + LinkedIn) [every 3rd scan]")
