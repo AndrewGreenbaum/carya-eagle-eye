@@ -2920,6 +2920,9 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
     - SPV structures (e.g., "Perplexity SPV1 Emerging Global", "SpaceX SPV-2024")
     - LLC/LP entities without comma (e.g., "Midwest REO RR LLC")
     - Fund-like suffixes (e.g., "Partners III", "Emerging Global")
+    - Partners + numeral (e.g., "Acme Partners III", "Growth Partners 2")
+    - Fund-type suffixes (e.g., "XYZ Growth Fund", "ABC Venture Fund")
+    - Investor entities (e.g., "Global AI Investors LLC", "Tech Investment LP")
     """
     if not deal or not deal.startup_name:
         return deal
@@ -3003,6 +3006,49 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
             f"Name matches fund code pattern: {name}"
         )
         return deal
+
+    # Pattern: "Partners" + roman numeral or number (e.g., "Acme Partners III", "Growth Partners 2")
+    # SAFE: Real startups don't append fund series numbers to "Partners"
+    if re.search(rf'\bpartners\s+({ROMAN_NUMERALS}|\d+)\s*$', name, re.IGNORECASE):
+        logger.warning(
+            f"Rejecting fund partners structure: '{name}' - ends with Partners + numeral"
+        )
+        increment_extraction_stat("fund_structure_rejected")
+        deal.is_new_announcement = False
+        deal.announcement_rejection_reason = (
+            f"Name looks like fund partners structure: {name} (Partners + series number)"
+        )
+        return deal
+
+    # Pattern: fund-type suffixes (e.g., "XYZ Growth Fund", "ABC Venture Fund")
+    # Catches compound fund names that don't have roman numerals
+    # SAFE: Real startups don't end with "Growth Fund", "Credit Fund", etc.
+    if re.search(r'\b(growth|opportunity|credit|venture|emerging)\s+fund\b', name, re.IGNORECASE):
+        logger.warning(
+            f"Rejecting fund-type suffix: '{name}' - contains fund-type suffix pattern"
+        )
+        increment_extraction_stat("fund_structure_rejected")
+        deal.is_new_announcement = False
+        deal.announcement_rejection_reason = (
+            f"Name contains fund-type suffix: {name} (growth/opportunity/credit/venture/emerging fund)"
+        )
+        return deal
+
+    # Pattern: "Investors"/"Investment" + LLC/LP/LLP without comma
+    # (e.g., "Global AI Investors LLC", "Tech Investment LP")
+    # Uses the expanded FUND_INDICATOR_WORDS set
+    INVESTOR_ENTITY_WORDS = {"investors", "investment", "fund"}
+    if re.search(r'\s(llc|lp|llp)$', name, re.IGNORECASE):
+        if any(word in name_lower for word in INVESTOR_ENTITY_WORDS):
+            logger.warning(
+                f"Rejecting investor entity: '{name}' - ends with LLC/LP/LLP + investor indicator"
+            )
+            increment_extraction_stat("fund_structure_rejected")
+            deal.is_new_announcement = False
+            deal.announcement_rejection_reason = (
+                f"Name looks like investor entity: {name} (ends with legal suffix + investor/investment/fund indicator)"
+            )
+            return deal
 
     from src.harvester.fund_matcher import match_fund_name
 

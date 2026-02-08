@@ -221,6 +221,7 @@ POST /enrichment/deals?limit=50&offset=0&skip_enriched=false&force_update=true
 
 ## Frontend
 **Stack:** React + Vite + Tailwind
+**Categories:** `EnterpriseCategory` type covers all 15 backend categories (5 enterprise AI + 3 consumer AI + 6 non-AI specific + not_ai)
 **Mobile:** Hidden stats cards, card layout for deals, drawer sidebar
 **Breakpoints:** sm:640px, md:768px, lg:1024px
 **Touch targets:** 44px minimum
@@ -399,8 +400,10 @@ create_scraper_client(user_agent, timeout, ...)
 | Scans stuck/timeout | Fixed 2026-02: Phase 2 heartbeat + STUCK_THRESHOLD=600s. If still occurs, check Railway logs for Claude API errors, DB pool exhaustion, or memory issues |
 | "Process died unexpectedly (heartbeat stale)" | Fixed 2026-02: Periodic heartbeat during Phase 2 parallel scrapers. STUCK_THRESHOLD increased from 300→600s |
 | External scrapers all show "Error" | Likely heartbeat timeout killed scan mid-Phase 2. Fixed 2026-02: heartbeat task runs every 30s during parallel scraper execution |
-| SEC Edgar fund structure leaks | Fixed 2026-02: Enhanced `_validate_startup_not_fund()` catches LLC/LP/LLP + fund indicator words (ventures, capital, partners, etc.) |
-| Duplicate deals in UI | Run `python3 scripts/cleanup_duplicate_deals.py --dry-run` in railway shell. Root cause: Same article scraped multiple times before dedup catches it. Script handles 3 cases: (1) exact duplicates (same company+round+date+amount), (2) null-field duplicates (same company, all fields NULL from incomplete extractions), (3) round-mismatch duplicates (same company+amount, different round type). Keeps oldest deal ID, reassigns articles. |
+| SEC Edgar fund structure leaks | Fixed 2026-02: Enhanced `_validate_startup_not_fund()` catches LLC/LP/LLP + fund indicator words, Partners+numeral, fund-type suffixes (Growth/Venture/Credit Fund), investor entities. Run `python3 scripts/cleanup_fund_structures.py --dry-run` to find remaining fund structures in DB |
+| Duplicate deals in UI | Run `python3 scripts/cleanup_duplicate_deals.py --dry-run` in railway shell. Script handles 5 cases: (1) exact duplicates, (2) null-field duplicates, (3) round-mismatch duplicates, (4) fuzzy name duplicates (suffix variations: Inc/LLC/Labs), (5) amount-based cross-round (±15% amount + 30-day window). Keeps oldest deal ID, reassigns articles. |
+| Category badges show "not ai" | Fixed 2026-02: Added 6 missing categories (crypto, fintech, healthcare, hardware, saas, other) to frontend `EnterpriseCategory` type, `CATEGORY_LABELS`, and `CATEGORY_ICONS`. Non-AI specific categories render with neutral slate badge style. |
+| NULL enterprise_category | Run `python3 scripts/backfill_enterprise_category.py --dry-run` to keyword-classify uncategorized deals (no LLM cost) |
 | Scan fails with "select not defined" | Fixed 2026-02: Missing import in jobs.py:2743 |
 
 ## Critical Rules

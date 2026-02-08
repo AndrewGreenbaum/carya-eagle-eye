@@ -17,9 +17,15 @@ import {
   Bot,
   Database,
   XCircle,
+  Coins,
+  Landmark,
+  Heart,
+  Microchip,
+  Cloud,
+  HelpCircle,
 } from 'lucide-react';
 import type { Deal, EnterpriseCategory, InvestmentStage } from '../types';
-import { STAGE_LABELS } from '../types';
+import { STAGE_LABELS, CATEGORY_LABELS } from '../types';
 
 interface DealCardProps {
   deal: Deal;
@@ -140,6 +146,12 @@ const CATEGORY_ICONS: Record<EnterpriseCategory, React.ReactNode> = {
   consumer_ai: <Bot className="w-3 h-3 text-blue-400" />,
   gaming_ai: <Bot className="w-3 h-3 text-purple-400" />,
   social_ai: <Bot className="w-3 h-3 text-pink-400" />,
+  crypto: <Coins className="w-3 h-3 text-amber-400" />,
+  fintech: <Landmark className="w-3 h-3 text-green-400" />,
+  healthcare: <Heart className="w-3 h-3 text-rose-400" />,
+  hardware: <Microchip className="w-3 h-3 text-cyan-400" />,
+  saas: <Cloud className="w-3 h-3 text-indigo-400" />,
+  other: <HelpCircle className="w-3 h-3 text-slate-400" />,
   not_ai: <XCircle className="w-3 h-3 text-red-900" />,
 };
 
@@ -168,6 +180,17 @@ function CategoryBadge({
       <div className={`category-badge category-consumer text-[10px] ${shouldDim ? 'opacity-75' : ''}`}>
         {icon}
         {cat.replace('_', ' ')}
+      </div>
+    );
+  }
+
+  const isNonAiSpecific = ['crypto', 'fintech', 'healthcare', 'hardware', 'saas', 'other'].includes(cat);
+
+  if (isNonAiSpecific) {
+    return (
+      <div className={`category-badge bg-slate-800/60 text-slate-300 border border-slate-700 text-[10px] ${shouldDim ? 'opacity-75' : ''}`}>
+        {icon}
+        {CATEGORY_LABELS[cat] || cat.replace('_', ' ')}
       </div>
     );
   }

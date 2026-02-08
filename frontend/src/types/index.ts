@@ -27,7 +27,14 @@ export type EnterpriseCategory =
   | 'consumer_ai'
   | 'gaming_ai'
   | 'social_ai'
-  // Non-AI
+  // Non-AI specific categories
+  | 'crypto'
+  | 'fintech'
+  | 'healthcare'
+  | 'hardware'
+  | 'saas'
+  | 'other'
+  // Non-AI generic
   | 'not_ai';
 
 export type ScraperType = 'html' | 'rss' | 'playwright' | 'external' | 'dom_diff';
@@ -408,7 +415,14 @@ export const CATEGORY_LABELS: Record<EnterpriseCategory, string> = {
   consumer_ai: 'Consumer AI',
   gaming_ai: 'Gaming AI',
   social_ai: 'Social AI',
-  // Non-AI
+  // Non-AI specific
+  crypto: 'Crypto',
+  fintech: 'Fintech',
+  healthcare: 'Healthcare',
+  hardware: 'Hardware',
+  saas: 'SaaS',
+  other: 'Other',
+  // Non-AI generic
   not_ai: 'Not AI',
 };
 
