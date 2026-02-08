@@ -659,5 +659,386 @@ class TestEmptyStringRegexHandling:
         assert result.is_new_announcement == False
 
 
+# =============================================================================
+# Fund Structure Validation Tests
+# =============================================================================
+class TestFundStructureValidation:
+    """Tests for _validate_startup_not_fund function."""
+
+    @staticmethod
+    def _create_deal(name):
+        """Create a DealExtraction with specified company name, bypassing validation."""
+        from src.analyst.schemas import DealExtraction, RoundType, LeadStatus, ChainOfThought
+        return DealExtraction.model_construct(
+            startup_name=name,
+            round_label=RoundType.SEED,
+            lead_investors=[],
+            participating_investors=[],
+            tracked_fund_is_lead=LeadStatus.UNRESOLVED,
+            confidence_score=0.8,
+            reasoning=ChainOfThought.model_construct(
+                article_type="press release",
+                funding_signals="test",
+                investors_mentioned="test",
+                lead_determination="test",
+                final_reasoning="test"
+            ),
+            is_new_announcement=True,
+            announcement_rejection_reason=None,
+            amount="$10M",
+        )
+
+    # --- Period-suffix normalization ---
+
+    def test_period_lp_suffix_rejected(self):
+        """L.P. (with periods) should be normalized and caught."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Acme Capital, L.P.")
+        result = _validate_startup_not_fund(deal, "Some article text")
+        assert result.is_new_announcement == False, "L.P. with periods should be rejected"
+
+    def test_period_llc_suffix_rejected(self):
+        """L.L.C. (with periods) should be normalized and caught."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Acme Holdings, L.L.C.")
+        result = _validate_startup_not_fund(deal, "Some article text")
+        assert result.is_new_announcement == False, "L.L.C. with periods should be rejected"
+
+    def test_ltd_suffix_rejected(self):
+        """Ltd. or Limited with comma should be caught."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("King Street Europe, Ltd.")
+        result = _validate_startup_not_fund(deal, "Some article text")
+        assert result.is_new_announcement == False, "Ltd. with comma should be rejected"
+
+    def test_limited_suffix_rejected(self):
+        """', Limited' should be caught."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Meridian Partners, Limited")
+        result = _validate_startup_not_fund(deal, "Some article text")
+        assert result.is_new_announcement == False, "Limited with comma should be rejected"
+
+    # --- SEC-source aggressive LLC/LP ---
+
+    def test_sec_source_plain_llc_rejected(self):
+        """Plain LLC from SEC source should be rejected (no fund indicator needed)."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Mintaka Doss LLC")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: Mintaka Doss LLC filed...")
+        assert result.is_new_announcement == False, "SEC-sourced plain LLC should be rejected"
+
+    def test_sec_source_plain_lp_rejected(self):
+        """Plain LP from SEC source should be rejected."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("RiverNorth Select Partners LP")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: RiverNorth Select Partners LP")
+        assert result.is_new_announcement == False, "SEC-sourced LP should be rejected"
+
+    def test_sec_source_plain_ltd_rejected(self):
+        """Plain Ltd from SEC source should be rejected."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("72 MA Solar Ltd")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: 72 MA Solar Ltd filed...")
+        assert result.is_new_announcement == False, "SEC-sourced Ltd should be rejected"
+
+    def test_non_sec_plain_llc_passes(self):
+        """Plain LLC from non-SEC source (no fund indicators) should pass."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("CoolAI LLC")
+        result = _validate_startup_not_fund(deal, "CoolAI LLC raised $10M in Series A")
+        assert result.is_new_announcement == True, "Non-SEC plain LLC without fund indicators should pass"
+
+    def test_non_sec_llc_with_fund_indicator_rejected(self):
+        """LLC with fund indicator from non-SEC source should be rejected."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Sequoia Growth Partners LLC")
+        result = _validate_startup_not_fund(deal, "Article about Sequoia Growth Partners LLC")
+        assert result.is_new_announcement == False, "LLC with fund indicator should be rejected"
+
+    # --- Series structures ---
+
+    def test_series_of_in_name_rejected(self):
+        """'a Series of' in company name should be rejected."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("T2 Care a Series of CGF2021 LLC")
+        result = _validate_startup_not_fund(deal, "Some article")
+        assert result.is_new_announcement == False, "'a Series of' in name should be rejected"
+
+    def test_series_of_in_sec_article_rejected(self):
+        """'a Series of' in SEC article text should be rejected (even if stripped from name)."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("T2 Care")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: T2 Care a Series of CGF2021 LLC")
+        assert result.is_new_announcement == False, "'a Series of' in SEC text should reject"
+
+    def test_series_of_in_non_sec_article_passes(self):
+        """'a Series of' in non-SEC article should NOT trigger rejection (could be coincidental)."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("TechStartup")
+        result = _validate_startup_not_fund(deal, "TechStartup launched a series of products")
+        assert result.is_new_announcement == True, "'a series of' in non-SEC text should pass"
+
+    # --- Regression: real startups must pass ---
+
+    def test_openai_passes(self):
+        """OpenAI should not be flagged as fund structure."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("OpenAI")
+        result = _validate_startup_not_fund(deal, "OpenAI raised $6B in new funding")
+        assert result.is_new_announcement == True
+
+    def test_anthropic_passes(self):
+        """Anthropic should not be flagged as fund structure."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Anthropic")
+        result = _validate_startup_not_fund(deal, "Anthropic raised $2B in Series C")
+        assert result.is_new_announcement == True
+
+    def test_datalabs_ai_passes(self):
+        """DataLabs AI should not be flagged as fund structure."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("DataLabs AI")
+        result = _validate_startup_not_fund(deal, "DataLabs AI raised $50M in Series A")
+        assert result.is_new_announcement == True
+
+    def test_fundrise_passes(self):
+        """Fundrise (starts with 'Fund' but is a startup) should pass."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Fundrise")
+        result = _validate_startup_not_fund(deal, "Fundrise raised $100M")
+        assert result.is_new_announcement == True
+
+    # --- Period normalization edge cases ---
+
+    def test_fund_roman_numeral_with_periods_rejected(self):
+        """'Fund VII, L.P.' should normalize and catch Fund+numeral+LP."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Acme Fund VII, L.P.")
+        result = _validate_startup_not_fund(deal, "Article text")
+        assert result.is_new_announcement == False
+
+    def test_multiple_periods_in_name_normalized(self):
+        """Names like 'A.B.C. Partners, L.P.' should normalize correctly."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("A.B.C. Partners, L.P.")
+        result = _validate_startup_not_fund(deal, "Article text")
+        assert result.is_new_announcement == False
+
+    def test_sec_source_lp_with_periods_rejected(self):
+        """SEC-sourced 'Acme L.P.' (no comma) should normalize and reject."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Acme L.P.")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: Acme L.P. filed Form D")
+        assert result.is_new_announcement == False
+
+    def test_sec_source_ltd_with_period_rejected(self):
+        """SEC-sourced 'Acme Ltd.' (no comma, with period) should reject."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Acme Ltd.")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: Acme Ltd. filed Form D")
+        assert result.is_new_announcement == False
+
+    def test_non_sec_ltd_no_fund_indicator_passes(self):
+        """Non-SEC 'Acme Ltd' without fund indicators should pass."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Acme Ltd")
+        result = _validate_startup_not_fund(deal, "Acme Ltd raised $5M in seed funding")
+        assert result.is_new_announcement == True
+
+    def test_non_sec_ltd_with_fund_indicator_rejected(self):
+        """Non-SEC 'Acme Capital Ltd' with fund indicator should reject."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Acme Capital Ltd")
+        result = _validate_startup_not_fund(deal, "Article about Acme Capital Ltd")
+        assert result.is_new_announcement == False
+
+    # --- Series of edge cases ---
+
+    def test_series_of_uppercase_in_name_rejected(self):
+        """'A SERIES OF' uppercase should be caught (case insensitive)."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("ALPHA A SERIES OF BETA FUND LLC")
+        result = _validate_startup_not_fund(deal, "Article text")
+        assert result.is_new_announcement == False
+
+    def test_series_of_mixed_case_rejected(self):
+        """'A Series Of' mixed case should be caught."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Omega A Series Of Delta Partners LLC")
+        result = _validate_startup_not_fund(deal, "Article text")
+        assert result.is_new_announcement == False
+
+    def test_series_without_a_prefix_passes(self):
+        """'Series B' (funding round) in name should NOT trigger series-of check."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("TechCorp")
+        result = _validate_startup_not_fund(deal, "TechCorp raised Series B funding")
+        assert result.is_new_announcement == True
+
+    def test_series_of_products_in_name_passes(self):
+        """A startup with 'series' in an innocent context should pass if no 'a series of' pattern."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("SeriesAI")
+        result = _validate_startup_not_fund(deal, "SeriesAI raised $20M")
+        assert result.is_new_announcement == True
+
+    # --- SEC-source aggressive edge cases ---
+
+    def test_sec_source_inc_passes(self):
+        """SEC-sourced company ending in 'Inc' should NOT be rejected (Inc = startup suffix)."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("TechCorp Inc")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: TechCorp Inc filed Form D")
+        assert result.is_new_announcement == True, "Inc is a startup suffix, not a fund suffix"
+
+    def test_sec_source_no_suffix_passes(self):
+        """SEC-sourced company with no legal suffix should pass."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("NovaTech")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: NovaTech raised $5M")
+        assert result.is_new_announcement == True
+
+    def test_sec_source_limited_no_comma_rejected(self):
+        """SEC-sourced 'Acme Limited' (no comma) should be rejected."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Acme Limited")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: Acme Limited filed Form D")
+        assert result.is_new_announcement == False
+
+    # --- Null/empty article text edge cases ---
+
+    def test_none_article_text_passes_normal_startup(self):
+        """Normal startup with None article text should pass."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("TechStartup")
+        result = _validate_startup_not_fund(deal, None)
+        assert result.is_new_announcement == True
+
+    def test_none_article_text_still_catches_name_patterns(self):
+        """Fund pattern in name should be caught even with None article text."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Acme Capital, L.P.")
+        result = _validate_startup_not_fund(deal, None)
+        assert result.is_new_announcement == False
+
+    def test_empty_article_text_passes_normal_startup(self):
+        """Normal startup with empty article text should pass."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("CloudScale")
+        result = _validate_startup_not_fund(deal, "")
+        assert result.is_new_announcement == True
+
+    # --- Real-world SEC fund structures that previously leaked ---
+
+    def test_rivernorth_select_partners_lp_rejected(self):
+        """Real leak: 'RiverNorth Select Partners, L.P.' should be caught."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("RiverNorth Select Partners, L.P.")
+        result = _validate_startup_not_fund(deal, "Article text")
+        assert result.is_new_announcement == False
+
+    def test_king_street_europe_ltd_rejected(self):
+        """Real leak: 'King Street Europe, Ltd.' should be caught."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("King Street Europe, Ltd.")
+        result = _validate_startup_not_fund(deal, "Article text")
+        assert result.is_new_announcement == False
+
+    def test_72_ma_solar_llc_sec_rejected(self):
+        """Real leak: '72 MA Solar LLC' from SEC should be caught."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("72 MA Solar LLC")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: 72 MA Solar LLC")
+        assert result.is_new_announcement == False
+
+    def test_t2_care_series_rejected(self):
+        """Real leak: 'T2 Care a Series of CGF2021 LLC' should be caught."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("T2 Care a Series of CGF2021 LLC")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: T2 Care a Series of CGF2021 LLC")
+        assert result.is_new_announcement == False
+
+    def test_mintaka_doss_llc_sec_rejected(self):
+        """Real leak: 'Mintaka Doss LLC' from SEC (no fund indicator) should be caught."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Mintaka Doss LLC")
+        result = _validate_startup_not_fund(deal, "SEC Form D Filing: Mintaka Doss LLC filed Form D")
+        assert result.is_new_announcement == False
+
+    # --- Regression: startup names that look tricky but should pass ---
+
+    def test_gofundme_passes(self):
+        """GoFundMe has 'Fund' in middle, not at end — should pass."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("GoFundMe")
+        result = _validate_startup_not_fund(deal, "GoFundMe raised $100M")
+        assert result.is_new_announcement == True
+
+    def test_fundbox_passes(self):
+        """FundBox has 'Fund' at start, not matching 'Fund I/II' pattern."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("FundBox")
+        result = _validate_startup_not_fund(deal, "FundBox raised $50M")
+        assert result.is_new_announcement == True
+
+    def test_techstart_lp_non_sec_passes(self):
+        """'TechStart LP' from non-SEC with no fund indicator should pass."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("TechStart LP")
+        result = _validate_startup_not_fund(deal, "TechStart LP raised $10M in Series A")
+        assert result.is_new_announcement == True
+
+    def test_vertex_ai_passes(self):
+        """Vertex AI should not be confused with any fund pattern."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Vertex AI")
+        result = _validate_startup_not_fund(deal, "Vertex AI raised $30M in Series B")
+        assert result.is_new_announcement == True
+
+    def test_scale_ai_passes(self):
+        """Scale AI should not be confused with any fund pattern."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Scale AI")
+        result = _validate_startup_not_fund(deal, "Scale AI raised $1B led by Accel")
+        assert result.is_new_announcement == True
+
+    def test_startup_with_partners_no_numeral_passes(self):
+        """'AI Partners' without roman numeral should pass (could be startup name)."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("AI Partners")
+        result = _validate_startup_not_fund(deal, "AI Partners raised $20M in Series A")
+        assert result.is_new_announcement == True
+
+    def test_startup_with_capital_in_name_passes(self):
+        """'Capital One' should pass (no legal suffix ending)."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Capital One")
+        result = _validate_startup_not_fund(deal, "Capital One raised $500M")
+        assert result.is_new_announcement == True
+
+    # --- Fund indicator words with legal suffixes (non-SEC) ---
+
+    def test_non_sec_llp_with_management_rejected(self):
+        """'Acme Management LLP' from non-SEC should be rejected (fund indicator + LLP)."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Acme Management LLP")
+        result = _validate_startup_not_fund(deal, "Acme Management LLP raised $200M")
+        assert result.is_new_announcement == False
+
+    def test_non_sec_holdings_limited_rejected(self):
+        """'Global Holdings Limited' from non-SEC should be rejected (fund indicator + Limited)."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Global Holdings Limited")
+        result = _validate_startup_not_fund(deal, "Global Holdings Limited raised $100M")
+        assert result.is_new_announcement == False
+
+    def test_non_sec_equity_lp_with_periods_rejected(self):
+        """'Acme Equity L.P.' from non-SEC should normalize and reject (fund indicator)."""
+        from src.analyst.extractor import _validate_startup_not_fund
+        deal = self._create_deal("Acme Equity L.P.")
+        result = _validate_startup_not_fund(deal, "Acme Equity L.P. raised $50M")
+        assert result.is_new_announcement == False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

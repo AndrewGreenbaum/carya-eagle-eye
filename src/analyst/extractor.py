@@ -2928,13 +2928,17 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
         return deal
 
     name = deal.startup_name
+    # Normalize periods: L.P. -> LP, L.L.C. -> LLC, Ltd. -> Ltd
+    name_normalized = re.sub(r'\.', '', name)
+    name_normalized_lower = name_normalized.lower()
+    is_sec_source = article_text.startswith("SEC Form D Filing:") if article_text else False
 
     # Check for LP/fund structure names (SEC Form D filings for investment vehicles)
     # Pattern: "XX-1234 Fund I", "Name Fund III", "Name, LP", etc.
     # These are investment funds, not startups
     # Roman numerals: I-III, IV, V, VI-VIII, IX, X, XI-XIII, XIV, XV, XVI+
     ROMAN_NUMERALS = r'(?:i{1,3}|iv|vi{0,3}|ix|xi{0,3}|xiv|xvi{0,3}|x{1,2}|xv)'
-    if re.search(rf'\bfund\s*({ROMAN_NUMERALS}|[0-9]+)?\s*,?\s*(lp|llc|llp)?$', name, re.IGNORECASE):
+    if re.search(rf'\bfund\s*({ROMAN_NUMERALS}|[0-9]+)?\s*,?\s*(lp|llc|llp)?$', name_normalized, re.IGNORECASE):
         logger.warning(
             f"Rejecting LP/fund structure: '{name}' - name ends with 'Fund' + roman numeral/LP"
         )
@@ -2948,7 +2952,7 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
     # Pattern: SPV (Special Purpose Vehicle) - catches "SPV1", "SPV-2024", "SPV I"
     # These are investment vehicle structures, not startups
     # SAFE: Real startups never have SPV in their name
-    if re.search(r'\bspv[\s\-]?([0-9]+|[ivxlc]+)?\b', name, re.IGNORECASE):
+    if re.search(r'\bspv[\s\-]?([0-9]+|[ivxlc]+)?\b', name_normalized, re.IGNORECASE):
         logger.warning(
             f"Rejecting SPV structure: '{name}' - contains SPV pattern"
         )
@@ -2959,10 +2963,35 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
         )
         return deal
 
-    # Pattern: ends with ", LP" or ", LLC" WITH COMMA (typical fund legal entities)
+    # Pattern: "a Series of" SPV structures (e.g., "T2 Care a Series of CGF2021 LLC")
+    # These are sub-funds / series LLCs, never real startups
+    if re.search(r'\ba\s+series\s+of\b', name_normalized, re.IGNORECASE):
+        logger.warning(
+            f"Rejecting series structure: '{name}' - contains 'a Series of' pattern"
+        )
+        increment_extraction_stat("fund_structure_rejected")
+        deal.is_new_announcement = False
+        deal.announcement_rejection_reason = (
+            f"Name contains series structure: {name} (SPV series, not startup)"
+        )
+        return deal
+
+    # Also check article text for "a series of" — LLM may strip series info from extracted name
+    if is_sec_source and article_text and re.search(r'\ba\s+series\s+of\b', article_text, re.IGNORECASE):
+        logger.warning(
+            f"Rejecting series structure (from article text): '{name}' - SEC filing mentions 'a Series of'"
+        )
+        increment_extraction_stat("fund_structure_rejected")
+        deal.is_new_announcement = False
+        deal.announcement_rejection_reason = (
+            f"SEC filing mentions series structure for: {name} (SPV series, not startup)"
+        )
+        return deal
+
+    # Pattern: ends with ", LP" or ", LLC" or ", Ltd" WITH COMMA (typical fund legal entities)
     # The comma indicates formal legal name, not brand name
     # SAFE: Startups use brand names, not "Company, LLC"
-    if re.search(r',\s*(lp|llc|llp)$', name, re.IGNORECASE):
+    if re.search(r',\s*(lp|llc|llp|ltd|limited)$', name_normalized, re.IGNORECASE):
         logger.warning(
             f"Rejecting LP entity: '{name}' - name ends with comma + legal entity suffix"
         )
@@ -2973,17 +3002,29 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
         )
         return deal
 
-    # Filter LLC/LP/LLP WITHOUT comma when name has strong fund indicators
-    # This catches SEC Form D fund structures while preserving real startups
-    # e.g. "Sequoia Growth Partners LP" → rejected, "CoolAI LLC" → passes through
+    # Filter LLC/LP/LLP/Ltd WITHOUT comma
+    # SEC sources: reject ALL (real startups also appear via Brave/news, so SEC-only LLC/LP is safe to reject)
+    # Non-SEC sources: only reject when name has strong fund indicators
+    # e.g. "Sequoia Growth Partners LP" → rejected, "CoolAI LLC" (non-SEC) → passes through
     FUND_INDICATOR_WORDS = {
         "ventures", "capital", "partners", "holdings", "management",
         "advisors", "investments", "equity", "asset", "associates",
         "group fund", "growth fund", "opportunity", "strategic",
     }
-    name_lower = name.lower()
-    if re.search(r'\s(llc|lp|llp)$', name, re.IGNORECASE):
-        if any(word in name_lower for word in FUND_INDICATOR_WORDS):
+    if re.search(r'\s(llc|lp|llp|ltd|limited)$', name_normalized, re.IGNORECASE):
+        if is_sec_source:
+            # SEC Form D: aggressively reject all LLC/LP/LLP/Ltd entities
+            # Real startups will also appear via Brave/news sources
+            logger.warning(
+                f"Rejecting SEC fund entity: '{name}' - SEC source + ends with legal suffix"
+            )
+            increment_extraction_stat("fund_structure_rejected")
+            deal.is_new_announcement = False
+            deal.announcement_rejection_reason = (
+                f"SEC filing with legal entity suffix: {name} (SEC Form D LLC/LP/Ltd are almost always fund structures)"
+            )
+            return deal
+        elif any(word in name_normalized_lower for word in FUND_INDICATOR_WORDS):
             logger.warning(
                 f"Rejecting fund entity: '{name}' - ends with LLC/LP/LLP + fund indicator"
             )
@@ -2996,7 +3037,7 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
 
     # Pattern: fund code format (e.g., "SP-1216 Fund I", "AU-0707 Fund III")
     # SAFE: These are internal fund codes, never startup names
-    if re.search(r'^[A-Z]{2,4}-\d{3,}', name) and 'fund' in name.lower():
+    if re.search(r'^[A-Z]{2,4}-\d{3,}', name_normalized) and 'fund' in name_normalized_lower:
         logger.warning(
             f"Rejecting fund code: '{name}' - matches fund code pattern"
         )
@@ -3009,7 +3050,7 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
 
     # Pattern: "Partners" + roman numeral or number (e.g., "Acme Partners III", "Growth Partners 2")
     # SAFE: Real startups don't append fund series numbers to "Partners"
-    if re.search(rf'\bpartners\s+({ROMAN_NUMERALS}|\d+)\s*$', name, re.IGNORECASE):
+    if re.search(rf'\bpartners\s+({ROMAN_NUMERALS}|\d+)\s*$', name_normalized, re.IGNORECASE):
         logger.warning(
             f"Rejecting fund partners structure: '{name}' - ends with Partners + numeral"
         )
@@ -3023,7 +3064,7 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
     # Pattern: fund-type suffixes (e.g., "XYZ Growth Fund", "ABC Venture Fund")
     # Catches compound fund names that don't have roman numerals
     # SAFE: Real startups don't end with "Growth Fund", "Credit Fund", etc.
-    if re.search(r'\b(growth|opportunity|credit|venture|emerging)\s+fund\b', name, re.IGNORECASE):
+    if re.search(r'\b(growth|opportunity|credit|venture|emerging)\s+fund\b', name_normalized, re.IGNORECASE):
         logger.warning(
             f"Rejecting fund-type suffix: '{name}' - contains fund-type suffix pattern"
         )
@@ -3038,8 +3079,8 @@ def _validate_startup_not_fund(deal: DealExtraction, article_text: str) -> DealE
     # (e.g., "Global AI Investors LLC", "Tech Investment LP")
     # Uses the expanded FUND_INDICATOR_WORDS set
     INVESTOR_ENTITY_WORDS = {"investors", "investment", "fund"}
-    if re.search(r'\s(llc|lp|llp)$', name, re.IGNORECASE):
-        if any(word in name_lower for word in INVESTOR_ENTITY_WORDS):
+    if re.search(r'\s(llc|lp|llp|ltd|limited)$', name_normalized, re.IGNORECASE):
+        if any(word in name_normalized_lower for word in INVESTOR_ENTITY_WORDS):
             logger.warning(
                 f"Rejecting investor entity: '{name}' - ends with LLC/LP/LLP + investor indicator"
             )

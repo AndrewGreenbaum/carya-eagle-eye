@@ -113,11 +113,14 @@ Article → Source Filter → Title Filter → Content Dedup → Keyword Filter 
 **Fund structure rejection** (2026-01, enhanced 2026-02): Catches SEC Form D filings for LP structures:
 - Names ending with "Fund I/II/.../XVI" (roman numerals)
 - Names ending with "Fund 1/2/.../N" (numbers)
-- Names ending with ", LP" / ", LLC" / ", LLP"
+- Names ending with ", LP" / ", LLC" / ", LLP" / ", Ltd" / ", Limited" (comma + legal suffix)
 - Fund codes like "SP-1216 Fund I", "AU-0707 Fund III"
-- **NEW (2026-02):** LLC/LP/LLP without comma + fund indicator words (ventures, capital, partners, holdings, management, advisors, investments, equity, asset, associates, etc.)
+- LLC/LP/LLP without comma + fund indicator words (ventures, capital, partners, holdings, management, advisors, investments, equity, asset, associates, etc.)
   - Rejects: "Sequoia Growth Partners LP", "ABC Capital Advisors LLC"
   - Preserves: "CoolAI LLC", "TechStart LP" (no fund indicator words)
+- **Period normalization (2026-02):** L.P. → LP, L.L.C. → LLC, Ltd. → Ltd before all pattern checks
+- **"a Series of" detection (2026-02):** Rejects "T2 Care a Series of CGF2021 LLC" (series LLC structures)
+- **SEC-source aggressive (2026-02):** SEC Form D + ANY LLC/LP/LLP/Ltd suffix → rejected (no fund indicator needed). Real startups also appear via Brave/news.
 - Safe: "Fundrise", "GoFundMe", "FundBox" (Fund not at end)
 
 **Confidence thresholds:** Default=0.50, External=0.40
@@ -400,7 +403,7 @@ create_scraper_client(user_agent, timeout, ...)
 | Scans stuck/timeout | Fixed 2026-02: Phase 2 heartbeat + STUCK_THRESHOLD=600s. If still occurs, check Railway logs for Claude API errors, DB pool exhaustion, or memory issues |
 | "Process died unexpectedly (heartbeat stale)" | Fixed 2026-02: Periodic heartbeat during Phase 2 parallel scrapers. STUCK_THRESHOLD increased from 300→600s |
 | External scrapers all show "Error" | Likely heartbeat timeout killed scan mid-Phase 2. Fixed 2026-02: heartbeat task runs every 30s during parallel scraper execution |
-| SEC Edgar fund structure leaks | Fixed 2026-02: Enhanced `_validate_startup_not_fund()` catches LLC/LP/LLP + fund indicator words, Partners+numeral, fund-type suffixes (Growth/Venture/Credit Fund), investor entities. Run `python3 scripts/cleanup_fund_structures.py --dry-run` to find remaining fund structures in DB |
+| SEC Edgar fund structure leaks | Fixed 2026-02: Period normalization (L.P.→LP), Ltd/Limited suffixes, "a Series of" SPV detection, SEC-source aggressive LLC/LP/Ltd rejection. Pre-filter in `sec_edgar.py` saves Claude API calls. Cleanup script (11 patterns) catches company-name patterns + article-title patterns (Pattern 10: "a Series of" in title, Pattern 11: SPV in title — catches deals where LLM cleaned the company name). Run `python3 scripts/cleanup_fund_structures.py --dry-run` to find remaining fund structures in DB |
 | Duplicate deals in UI | Run `python3 scripts/cleanup_duplicate_deals.py --dry-run` in railway shell. Script handles 5 cases: (1) exact duplicates, (2) null-field duplicates, (3) round-mismatch duplicates, (4) fuzzy name duplicates (suffix variations: Inc/LLC/Labs), (5) amount-based cross-round (±15% amount + 30-day window). Keeps oldest deal ID, reassigns articles. |
 | Category badges show "not ai" | Fixed 2026-02: Added 6 missing categories (crypto, fintech, healthcare, hardware, saas, other) to frontend `EnterpriseCategory` type, `CATEGORY_LABELS`, and `CATEGORY_ICONS`. Non-AI specific categories render with neutral slate badge style. |
 | NULL enterprise_category | Run `python3 scripts/backfill_enterprise_category.py --dry-run` to keyword-classify uncategorized deals (no LLM cost) |

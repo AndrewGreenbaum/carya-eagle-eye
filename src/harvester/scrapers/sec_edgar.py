@@ -442,7 +442,9 @@ class SECEdgarScraper:
 
         Returns True if the name is definitely a fund/SPV structure.
         """
-        name_lower = company_name.lower()
+        # Normalize periods: L.P. -> LP, L.L.C. -> LLC, Ltd. -> Ltd
+        name_normalized = re.sub(r'\.', '', company_name)
+        name_lower = name_normalized.lower()
 
         # SPV pattern - catches "SPV1", "SPV2", "SPV-2024", "SPV I"
         # Real startups NEVER have SPV in their name
@@ -454,8 +456,19 @@ class SECEdgarScraper:
         if re.search(r'\bfund\s*[ivxlc0-9]+', name_lower):
             return True
 
+        # "a Series of" — sub-fund / series LLC structures
+        # e.g. "T2 Care a Series of CGF2021 LLC"
+        if re.search(r'\ba\s+series\s+of\b', name_lower):
+            return True
+
+        # Comma + legal suffix — formal fund legal name
+        # e.g. "King Street Europe, Ltd.", "RiverNorth Partners, L.P."
+        if re.search(r',\s*(lp|llc|llp|ltd|limited)\s*$', name_lower):
+            return True
+
         # NOTE: We intentionally do NOT filter on:
         # - LLC/LP suffix alone (some startups file as LLC before converting)
+        #   → extractor.py handles this with SEC-source context
         # - "Partners/Capital/Ventures" alone (could be startup names)
         # - "Emerging" patterns (too aggressive)
         # These are handled in extractor.py with more context from the LLM

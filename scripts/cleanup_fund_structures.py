@@ -35,16 +35,20 @@ from psycopg2.extras import RealDictCursor
 def find_fund_structures(cur):
     """
     Find deals where the company name matches fund/LP/SPV patterns.
+    Uses REPLACE(pc.name, '.', '') to normalize L.P. -> LP, L.L.C. -> LLC, Ltd. -> Ltd.
 
     Patterns:
     1. Names ending with "Fund" + optional roman numeral/number + optional LP/LLC
-    2. Names ending with ", LP" or ", LLC" or ", LLP" (comma + legal suffix)
-    3. Names ending with "LP"/"LLC"/"LLP" (no comma) AND containing fund indicator words
+    2. Names ending with ", LP" / ", LLC" / ", LLP" / ", Ltd" / ", Limited" (comma + legal suffix)
+    3. Names ending with LP/LLC/LLP/Ltd (no comma) AND containing fund indicator words
     4. Names matching SPV patterns
     5. Names ending with "Partners" + roman numeral/number
     6. Fund code patterns (XX-1234 Fund)
     7. Names containing fund-type suffixes (Growth Fund, Venture Fund, etc.)
-    8. Names ending with "Investors"/"Investment" + LLC/LP/LLP
+    8. Names containing "a Series of" (series LLC structures)
+    9. SEC-sourced deals ending with LLC/LP/LLP/Ltd (no fund indicator needed)
+    10. Article title contains "a Series of" (LLM cleaned company name but title has full SEC name)
+    11. Article title contains SPV pattern (e.g., "Fusion VC SPV Hoopo LLC")
     """
     cur.execute("""
         SELECT
@@ -57,13 +61,13 @@ def find_fund_structures(cur):
         FROM deals d
         JOIN portfolio_companies pc ON d.company_id = pc.id
         WHERE
-            -- Pattern 1: "Fund" + optional roman numeral/number + optional LP/LLC
-            pc.name ~* '\\mfund\\s*(i{1,3}|iv|vi{0,3}|ix|xi{0,3}|xiv|xvi{0,3}|x{1,2}|xv|[0-9]+)?\\s*,?\\s*(lp|llc|llp)?$'
-            -- Pattern 2: ends with ", LP" / ", LLC" / ", LLP"
-            OR pc.name ~* ',\\s*(lp|llc|llp)$'
-            -- Pattern 3: ends with LP/LLC/LLP (no comma) + fund indicator words
+            -- Pattern 1: "Fund" + optional roman numeral/number + optional LP/LLC (period-normalized)
+            REPLACE(pc.name, '.', '') ~* '\\mfund\\s*(i{1,3}|iv|vi{0,3}|ix|xi{0,3}|xiv|xvi{0,3}|x{1,2}|xv|[0-9]+)?\\s*,?\\s*(lp|llc|llp)?$'
+            -- Pattern 2: ends with ", LP" / ", LLC" / ", LLP" / ", Ltd" / ", Limited" (period-normalized)
+            OR REPLACE(pc.name, '.', '') ~* ',\\s*(lp|llc|llp|ltd|limited)$'
+            -- Pattern 3: ends with LP/LLC/LLP/Ltd (no comma) + fund indicator words (period-normalized)
             OR (
-                pc.name ~* '\\s(llc|lp|llp)$'
+                REPLACE(pc.name, '.', '') ~* '\\s(llc|lp|llp|ltd|limited)$'
                 AND pc.name ~* '(ventures|capital|partners|holdings|management|advisors|investments|equity|asset|associates|investors|investment|fund)'
             )
             -- Pattern 4: SPV patterns
@@ -74,6 +78,28 @@ def find_fund_structures(cur):
             OR (pc.name ~ '^[A-Z]{2,4}-[0-9]{3,}' AND pc.name ~* 'fund')
             -- Pattern 7: Fund-type suffixes
             OR pc.name ~* '\\m(growth|opportunity|credit|venture|emerging)\\s+fund\\M'
+            -- Pattern 8: "a Series of" structures (sub-fund / series LLC)
+            OR pc.name ~* '\\ma\\s+series\\s+of\\M'
+            -- Pattern 9: SEC-sourced deals with legal entity suffix (period-normalized)
+            OR (
+                REPLACE(pc.name, '.', '') ~* '\\s(llc|lp|llp|ltd|limited)$'
+                AND EXISTS (
+                    SELECT 1 FROM articles a
+                    WHERE a.deal_id = d.id AND a.title LIKE 'SEC Form D:%'
+                )
+            )
+            -- Pattern 10: Article title contains "a Series of" (LLM cleaned name but title has full SEC name)
+            OR EXISTS (
+                SELECT 1 FROM articles a
+                WHERE a.deal_id = d.id
+                AND a.title ~* 'a\\s+series\\s+of'
+            )
+            -- Pattern 11: Article title contains SPV pattern (e.g., "Fusion VC SPV Hoopo LLC")
+            OR EXISTS (
+                SELECT 1 FROM articles a
+                WHERE a.deal_id = d.id
+                AND a.title ~* '\\mspv[\\s\\-]?[0-9ivxlc]*\\M'
+            )
         ORDER BY pc.name, d.id
     """)
     return cur.fetchall()
@@ -125,7 +151,7 @@ def delete_fund_deal(cur, deal_id, company_name, dry_run=False):
     print(f"    Deleted deal #{deal_id}, nullified {articles_nulled} articles")
 
 
-def run_cleanup(dry_run=False):
+def run_cleanup(dry_run=False, exclude_ids=None):
     """Run the fund structure cleanup."""
     print("Connecting to database...")
     conn = psycopg2.connect(DATABASE_URL)
@@ -137,6 +163,9 @@ def run_cleanup(dry_run=False):
     try:
         print("\n=== Finding fund structure deals ===")
         fund_deals = find_fund_structures(cur)
+
+        if exclude_ids:
+            fund_deals = [d for d in fund_deals if d['id'] not in exclude_ids]
 
         if fund_deals:
             print(f"Found {len(fund_deals)} fund structure deals:\n")
@@ -182,6 +211,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Cleanup fund structure deals from the database')
     parser.add_argument('--dry-run', action='store_true',
                        help='Show what would be deleted without actually deleting')
+    parser.add_argument('--exclude', type=str, default='',
+                       help='Comma-separated deal IDs to exclude (e.g., --exclude 123,456)')
     args = parser.parse_args()
 
-    run_cleanup(dry_run=args.dry_run)
+    exclude_ids = set()
+    if args.exclude:
+        exclude_ids = {int(x.strip()) for x in args.exclude.split(',') if x.strip()}
+        print(f"Excluding deal IDs: {exclude_ids}")
+
+    run_cleanup(dry_run=args.dry_run, exclude_ids=exclude_ids)
