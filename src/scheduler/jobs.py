@@ -129,7 +129,9 @@ _job_tracker = JobTracker()
 
 # FIX 2026-01: Per-source timeout to prevent job hangs on slow HTTP responses
 # Without this, a single slow source can hang the entire job indefinitely
-SOURCE_SCRAPE_TIMEOUT = 60.0  # 60 seconds per source (covers HTTP + processing)
+SOURCE_SCRAPE_TIMEOUT = 60.0  # Legacy: kept for backward compat (unused after two-phase refactor)
+SCRAPE_ONLY_TIMEOUT = 120.0   # Phase 2a: HTTP scraping only (no LLM extraction)
+BRAVE_SEARCH_TIMEOUT = 300.0   # Brave makes 40-60+ API queries; 180s was too tight
 
 
 async def with_timeout(coro, timeout: float, source_name: str):
@@ -1965,7 +1967,7 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
                         include_partner_names=True,  # Critical for Benchmark, Khosla, First Round
                     )
 
-            articles = await asyncio.wait_for(_scrape_brave(), timeout=180.0)
+            articles = await asyncio.wait_for(_scrape_brave(), timeout=BRAVE_SEARCH_TIMEOUT)
 
             # Skip title filter - Brave queries are already targeted at funding news
             stats = await process_external_articles(articles, "brave_search", scan_job_id, skip_title_filter=True)
@@ -1974,8 +1976,8 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             _circuit_breaker.record_success("brave_search")
 
         except asyncio.TimeoutError:
-            logger.error("SCRAPER_TIMEOUT: brave_search timed out after 180s")
-            results["brave_search"] = {"error": "timeout after 180s", "articles_found": 0}
+            logger.error("SCRAPER_TIMEOUT: brave_search timed out after %ss", BRAVE_SEARCH_TIMEOUT)
+            results["brave_search"] = {"error": f"timeout after {BRAVE_SEARCH_TIMEOUT}s", "articles_found": 0}
             _circuit_breaker.record_error("brave_search")
         except Exception as e:
             logger.error("Brave Search scraping failed: %s", e)
@@ -2148,13 +2150,19 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             results["delaware_corps"] = {"error": str(e)}
 
     # =========================================================================
-    # PART 2: FREE RSS/HTTP SOURCES (run in parallel - no rate limits)
-    # FIX: Was running 12+ sources serially (~60s wasted)
-    # Now: All run in parallel with asyncio.gather (~5-10s total)
+    # PART 2: FREE RSS/HTTP SOURCES — TWO-PHASE ARCHITECTURE
+    # FIX 2026-02: Previous design wrapped HTTP scraping + LLM extraction in
+    # a single 60s timeout per source. LLM extraction alone takes 30-150s,
+    # causing ALL 11 sources to timeout every scan for 9+ days.
+    #
+    # NEW: Phase 2a = HTTP scraping only (120s timeout, parallel)
+    #      Phase 2b = LLM extraction (no per-source timeout, sequential with heartbeats)
     # =========================================================================
 
+    # --- Phase 2a: HTTP scraping only (no LLM) ---
+
     async def scrape_google_alerts() -> tuple:
-        """Scrape Google Alerts RSS feeds."""
+        """Scrape Google Alerts RSS feeds (HTTP only)."""
         source_name = "google_alerts"
         if not settings.google_alerts_feeds:
             return source_name, {"articles_found": 0, "status": "not_configured"}
@@ -2163,110 +2171,97 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             feed_urls = [f.strip() for f in settings.google_alerts_feeds.split(',') if f.strip()]
             async with GoogleAlertsScraper(feed_urls) as scraper:
                 articles = await scraper.scrape_all()
-            stats = await process_external_articles(articles, source_name, scan_job_id)
-            return source_name, stats
+            return source_name, {"articles": articles, "skip_title_filter": False}
         except Exception as e:
             logger.error("Google Alerts scraping failed: %s", e)
             return source_name, {"error": str(e)}
 
     async def scrape_techcrunch() -> tuple:
-        """Scrape TechCrunch RSS."""
+        """Scrape TechCrunch RSS (HTTP only)."""
         source_name = "techcrunch"
         try:
             from ..harvester.scrapers.techcrunch_rss import TechCrunchScraper
             async with TechCrunchScraper() as scraper:
                 articles = await scraper.scrape_all(hours_back=days * 24)
-            stats = await process_external_articles(articles, source_name, scan_job_id)
-            return source_name, stats
+            return source_name, {"articles": articles, "skip_title_filter": False}
         except Exception as e:
             logger.error("TechCrunch scraping failed: %s", e)
             return source_name, {"error": str(e)}
 
     async def scrape_crunchbase() -> tuple:
-        """Scrape Crunchbase News RSS."""
+        """Scrape Crunchbase News RSS (HTTP only)."""
         source_name = "crunchbase_news"
         try:
             from ..harvester.scrapers.crunchbase_news import CrunchbaseNewsScraper
             async with CrunchbaseNewsScraper() as scraper:
                 articles = await scraper.scrape_all(hours_back=days * 24)
-            # Bypass title filter - Crunchbase is funding-focused
-            stats = await process_external_articles(articles, source_name, scan_job_id, skip_title_filter=True)
-            return source_name, stats
+            return source_name, {"articles": articles, "skip_title_filter": True}
         except Exception as e:
             logger.error("Crunchbase News scraping failed: %s", e)
             return source_name, {"error": str(e)}
 
     async def scrape_venturebeat() -> tuple:
-        """Scrape VentureBeat RSS."""
+        """Scrape VentureBeat RSS (HTTP only)."""
         source_name = "venturebeat"
         try:
             from ..harvester.scrapers.venturebeat import VentureBeatScraper
             async with VentureBeatScraper() as scraper:
                 articles = await scraper.scrape_all(hours_back=days * 24)
-            stats = await process_external_articles(articles, source_name, scan_job_id)
-            return source_name, stats
+            return source_name, {"articles": articles, "skip_title_filter": False}
         except Exception as e:
             logger.error("VentureBeat scraping failed: %s", e)
             return source_name, {"error": str(e)}
 
     async def scrape_axios() -> tuple:
-        """Scrape Axios Pro Rata RSS."""
+        """Scrape Axios Pro Rata RSS (HTTP only)."""
         source_name = "axios_prorata"
         try:
             from ..harvester.scrapers.axios_prorata import AxiosProRataScraper
             async with AxiosProRataScraper() as scraper:
                 articles = await scraper.scrape_all(hours_back=days * 24)
-            stats = await process_external_articles(articles, source_name, scan_job_id)
-            return source_name, stats
+            return source_name, {"articles": articles, "skip_title_filter": False}
         except Exception as e:
             logger.error("Axios Pro Rata scraping failed: %s", e)
             return source_name, {"error": str(e)}
 
     async def scrape_strictlyvc() -> tuple:
-        """Scrape StrictlyVC RSS."""
+        """Scrape StrictlyVC RSS (HTTP only)."""
         source_name = "strictlyvc"
         try:
             from ..harvester.scrapers.strictlyvc import StrictlyVCScraper
             async with StrictlyVCScraper() as scraper:
                 articles = await scraper.scrape_all(hours_back=days * 24)
-            stats = await process_external_articles(articles, source_name, scan_job_id)
-            return source_name, stats
+            return source_name, {"articles": articles, "skip_title_filter": False}
         except Exception as e:
             logger.error("StrictlyVC scraping failed: %s", e)
             return source_name, {"error": str(e)}
 
     async def scrape_prwire() -> tuple:
-        """Scrape PR Wire RSS (PRNewswire, GlobeNewswire, BusinessWire)."""
+        """Scrape PR Wire RSS (HTTP only)."""
         source_name = "prwire"
         try:
             from ..harvester.scrapers.prwire_rss import PRWireRSSScraper
             async with PRWireRSSScraper() as scraper:
                 articles = await scraper.scrape_all_feeds(hours_back=days * 24, fund_filter=True)
-            stats = await process_external_articles(articles, source_name, scan_job_id)
-            return source_name, stats
+            return source_name, {"articles": articles, "skip_title_filter": False}
         except Exception as e:
             logger.error("PR Wire RSS scraping failed: %s", e)
             return source_name, {"error": str(e)}
 
     async def scrape_google_news() -> tuple:
-        """Scrape Google News RSS for external-only funds (Thrive, Benchmark, etc.)."""
+        """Scrape Google News RSS (HTTP only)."""
         source_name = "google_news"
         try:
             from ..harvester.scrapers.google_news_rss import GoogleNewsRSSScraper
             async with GoogleNewsRSSScraper() as scraper:
                 articles = await scraper.scrape_all(days_back=days)
-            stats = await process_external_articles(articles, source_name, scan_job_id, skip_title_filter=True)
-            return source_name, stats
+            return source_name, {"articles": articles, "skip_title_filter": True}
         except Exception as e:
             logger.error("Google News RSS scraping failed: %s", e)
             return source_name, {"error": str(e)}
 
     async def scrape_ycombinator() -> tuple:
-        """Scrape Y Combinator (Demo Day companies).
-
-        ROUTED TO STEALTH PIPELINE: This source produces 0 deals but good pre-funding signals.
-        YC Demo Day companies are excellent early signals (saves ~$10/month in LLM costs).
-        """
+        """Scrape Y Combinator (stealth pipeline — no LLM needed)."""
         source_name = "ycombinator"
         try:
             from ..harvester.scrapers.ycombinator import YCombinatorScraper
@@ -2279,11 +2274,7 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             return source_name, {"error": str(e)}
 
     async def scrape_github() -> tuple:
-        """Scrape GitHub Trending (dev tools before funding).
-
-        ROUTED TO STEALTH PIPELINE: This source produces 0 deals but good pre-funding signals.
-        Trending repos are often VC-backed startups before announcement (saves ~$8/month in LLM costs).
-        """
+        """Scrape GitHub Trending (stealth pipeline — no LLM needed)."""
         source_name = "github_trending"
         try:
             from ..harvester.scrapers.github_trending import GitHubTrendingScraper
@@ -2297,11 +2288,7 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             return source_name, {"error": str(e)}
 
     async def scrape_hackernews() -> tuple:
-        """Scrape Hacker News (launch posts).
-
-        ROUTED TO STEALTH PIPELINE: This source produces 0 deals but good pre-funding signals.
-        Launch HN posts are often pre-funding companies (saves ~$10/month in LLM costs).
-        """
+        """Scrape Hacker News (stealth pipeline — no LLM needed)."""
         source_name = "hackernews"
         try:
             from ..harvester.scrapers.hackernews import HackerNewsScraper
@@ -2314,35 +2301,31 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             return source_name, {"error": str(e)}
 
     async def scrape_tech_funding_news() -> tuple:
-        """Scrape Tech Funding News RSS (SaaS/AI/FinTech)."""
+        """Scrape Tech Funding News RSS (HTTP only)."""
         source_name = "tech_funding_news"
         try:
             from ..harvester.scrapers.tech_funding_news import TechFundingNewsScraper
             async with TechFundingNewsScraper() as scraper:
                 articles = await scraper.scrape_all(hours_back=days * 24)
-            # Bypass title filter - this is literally a funding news site
-            stats = await process_external_articles(articles, source_name, scan_job_id, skip_title_filter=True)
-            return source_name, stats
+            return source_name, {"articles": articles, "skip_title_filter": True}
         except Exception as e:
             logger.error("Tech Funding News scraping failed: %s", e)
             return source_name, {"error": str(e)}
 
     async def scrape_ventureburn() -> tuple:
-        """Scrape Ventureburn RSS (emerging markets/Africa)."""
+        """Scrape Ventureburn RSS (HTTP only)."""
         source_name = "ventureburn"
         try:
             from ..harvester.scrapers.ventureburn import VentureburnScraper
             async with VentureburnScraper() as scraper:
                 articles = await scraper.scrape_all(hours_back=days * 24)
-            # Bypass title filter - Ventureburn is funding-focused
-            stats = await process_external_articles(articles, source_name, scan_job_id, skip_title_filter=True)
-            return source_name, stats
+            return source_name, {"articles": articles, "skip_title_filter": True}
         except Exception as e:
             logger.error("Ventureburn scraping failed: %s", e)
             return source_name, {"error": str(e)}
 
     async def scrape_portfolio_diff() -> tuple:
-        """Scrape Portfolio Diff (stealth detection via portfolio page diffing)."""
+        """Scrape Portfolio Diff (custom save logic — no LLM needed)."""
         source_name = "portfolio_diff"
         try:
             from ..harvester.scrapers.portfolio_diff import PortfolioDiffScraper
@@ -2377,41 +2360,92 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             logger.error("Portfolio Diff scraping failed: %s", e)
             return source_name, {"error": str(e)}
 
-    # Run all free sources in parallel with individual timeouts
-    # FIX 2026-01: Each source has a 60s timeout to prevent job hangs
+    # Phase 2a: Run all HTTP scraping in parallel (120s timeout, NO LLM extraction)
     # NOTE: Removed 3 dead RSS sources (Dec 2025):
     #   - scrape_venturebeat() - RSS blocked/empty
     #   - scrape_axios() - RSS 404, feed deprecated
     #   - scrape_strictlyvc() - RSS dead since April 2020
-    logger.info("Phase 2b: Running 11 free RSS/HTTP sources in parallel (60s timeout each)...")
+    phase2a_start = time.monotonic()
+    logger.info("Phase 2a: Scraping 11 free RSS/HTTP sources in parallel (%ss timeout, HTTP only)...", SCRAPE_ONLY_TIMEOUT)
     parallel_tasks = [
-        with_timeout(scrape_google_alerts(), SOURCE_SCRAPE_TIMEOUT, "google_alerts"),
-        with_timeout(scrape_techcrunch(), SOURCE_SCRAPE_TIMEOUT, "techcrunch"),
-        with_timeout(scrape_crunchbase(), SOURCE_SCRAPE_TIMEOUT, "crunchbase_news"),
+        with_timeout(scrape_google_alerts(), SCRAPE_ONLY_TIMEOUT, "google_alerts"),
+        with_timeout(scrape_techcrunch(), SCRAPE_ONLY_TIMEOUT, "techcrunch"),
+        with_timeout(scrape_crunchbase(), SCRAPE_ONLY_TIMEOUT, "crunchbase_news"),
         # scrape_venturebeat(),  # DISABLED: RSS blocked Dec 2025
         # scrape_axios(),  # DISABLED: RSS 404 Dec 2025
         # scrape_strictlyvc(),  # DISABLED: RSS dead since April 2020
-        with_timeout(scrape_prwire(), SOURCE_SCRAPE_TIMEOUT, "prwire"),
-        with_timeout(scrape_google_news(), SOURCE_SCRAPE_TIMEOUT, "google_news"),
-        with_timeout(scrape_ycombinator(), SOURCE_SCRAPE_TIMEOUT, "ycombinator"),
-        with_timeout(scrape_github(), SOURCE_SCRAPE_TIMEOUT, "github_trending"),
-        with_timeout(scrape_hackernews(), SOURCE_SCRAPE_TIMEOUT, "hackernews"),
-        with_timeout(scrape_tech_funding_news(), SOURCE_SCRAPE_TIMEOUT, "tech_funding_news"),
-        with_timeout(scrape_ventureburn(), SOURCE_SCRAPE_TIMEOUT, "ventureburn"),
-        with_timeout(scrape_portfolio_diff(), SOURCE_SCRAPE_TIMEOUT, "portfolio_diff"),
+        with_timeout(scrape_prwire(), SCRAPE_ONLY_TIMEOUT, "prwire"),
+        with_timeout(scrape_google_news(), SCRAPE_ONLY_TIMEOUT, "google_news"),
+        with_timeout(scrape_ycombinator(), SCRAPE_ONLY_TIMEOUT, "ycombinator"),
+        with_timeout(scrape_github(), SCRAPE_ONLY_TIMEOUT, "github_trending"),
+        with_timeout(scrape_hackernews(), SCRAPE_ONLY_TIMEOUT, "hackernews"),
+        with_timeout(scrape_tech_funding_news(), SCRAPE_ONLY_TIMEOUT, "tech_funding_news"),
+        with_timeout(scrape_ventureburn(), SCRAPE_ONLY_TIMEOUT, "ventureburn"),
+        with_timeout(scrape_portfolio_diff(), SCRAPE_ONLY_TIMEOUT, "portfolio_diff"),
     ]
 
     parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
 
-    # Process parallel results
+    # Collect scraped articles for Phase 2b extraction, and finalize non-LLM sources
+    sources_with_articles = []  # [(source_name, articles, skip_title_filter)]
     for result in parallel_results:
         if isinstance(result, Exception):
             logger.error(f"Parallel scrape task failed: {result}")
             continue
-        source_name, stats = result
-        results[source_name] = stats
-        if isinstance(stats, dict) and "deals_saved" in stats:
-            total_deals_saved += stats["deals_saved"]
+        source_name, data = result
+        if isinstance(data, dict) and "articles" in data:
+            # Source returned articles for LLM extraction in Phase 2b
+            articles_list = data["articles"]
+            skip_filter = data.get("skip_title_filter", False)
+            if articles_list:
+                sources_with_articles.append((source_name, articles_list, skip_filter))
+            else:
+                results[source_name] = {"articles_found": 0, "deals_saved": 0}
+        else:
+            # Source already finalized (stealth pipeline, portfolio_diff, error, or not_configured)
+            results[source_name] = data
+            if isinstance(data, dict) and "deals_saved" in data:
+                total_deals_saved += data["deals_saved"]
+
+    phase2a_elapsed = time.monotonic() - phase2a_start
+    sources_with_count = [(s, len(a)) for s, a, _ in sources_with_articles]
+    logger.info(
+        "Phase 2a: Scraping completed in %.1fs — %d sources with articles: %s",
+        phase2a_elapsed,
+        len(sources_with_articles),
+        ", ".join(f"{s}({n})" for s, n in sources_with_count) or "none",
+    )
+
+    # Heartbeat after Phase 2a scraping
+    if guard:
+        await guard.heartbeat()
+
+    # --- Phase 2b: LLM extraction (no per-source timeout) ---
+    phase2b_start = time.monotonic()
+    logger.info("Phase 2b: Extracting deals from %d sources via LLM...", len(sources_with_articles))
+
+    for source_name, articles_list, skip_filter in sources_with_articles:
+        source_start = time.monotonic()
+        try:
+            stats = await process_external_articles(
+                articles_list, source_name, scan_job_id, skip_title_filter=skip_filter
+            )
+            results[source_name] = stats
+            if "deals_saved" in stats:
+                total_deals_saved += stats["deals_saved"]
+        except Exception as e:
+            logger.error("Phase 2b: %s extraction failed: %s", source_name, e)
+            results[source_name] = {"error": str(e), "articles_found": len(articles_list)}
+
+        source_elapsed = time.monotonic() - source_start
+        logger.info("Phase 2b: %s extraction took %.1fs (%d articles)", source_name, source_elapsed, len(articles_list))
+
+        # Heartbeat between sources to prevent stuck detection
+        if guard:
+            await guard.heartbeat()
+
+    phase2b_elapsed = time.monotonic() - phase2b_start
+    logger.info("Phase 2b: All extractions completed in %.1fs", phase2b_elapsed)
 
     # Fortune Term Sheet - DISABLED (Fortune blocked RSS access Dec 2024)
     results["fortune"] = {"articles_found": 0, "deals_saved": 0, "status": "disabled"}

@@ -1893,6 +1893,51 @@ async def get_scraper_status():
     return response
 
 
+@app.get("/scrapers/diagnostics")
+async def get_scraper_diagnostics(api_key: str = Depends(verify_api_key)):
+    """Inspect scraper health: circuit breaker stats, timeout configs, last scan source errors.
+
+    Read-only endpoint for debugging scraper timeouts and failures without
+    parsing full scan JSON.
+    """
+    from .scheduler.jobs import _circuit_breaker, SOURCE_SCRAPE_TIMEOUT, SCRAPE_ONLY_TIMEOUT, BRAVE_SEARCH_TIMEOUT
+
+    # Get last scan results for source-level error info
+    last_scan_errors = {}
+    last_scan_id = None
+    try:
+        async with get_session() as session:
+            from .archivist.models import ScanJob
+            result = await session.execute(
+                select(ScanJob)
+                .order_by(ScanJob.id.desc())
+                .limit(1)
+            )
+            scan = result.scalar_one_or_none()
+            if scan:
+                last_scan_id = scan.id
+                scan_results = scan.results or {}
+                for source_name, stats in scan_results.items():
+                    if source_name == "total_deals_saved":
+                        continue
+                    if isinstance(stats, dict) and "error" in stats:
+                        last_scan_errors[source_name] = stats["error"]
+    except Exception as e:
+        logger.warning("Failed to fetch last scan for diagnostics: %s", e)
+
+    return {
+        "circuit_breaker": _circuit_breaker.get_stats(),
+        "timeout_config": {
+            "source_scrape_timeout_legacy": SOURCE_SCRAPE_TIMEOUT,
+            "scrape_only_timeout": SCRAPE_ONLY_TIMEOUT,
+            "brave_search_timeout": BRAVE_SEARCH_TIMEOUT,
+        },
+        "last_scan_id": last_scan_id,
+        "last_scan_source_errors": last_scan_errors,
+        "architecture": "two-phase (2a=HTTP scrape, 2b=LLM extraction)",
+    }
+
+
 @app.post("/scrapers/run/{fund_slug}", response_model=ScrapeResponse)
 async def run_scraper(
     fund_slug: str,

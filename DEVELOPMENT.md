@@ -63,6 +63,7 @@ GET  /deals?is_lead=true&is_enterprise_ai=true&fund_slug=a16z
 POST /enrichment/deals?limit=50&offset=0&skip_enriched=true
 GET  /enrichment/stats  # Returns coverage: with_both, missing_both, etc.
 GET  /brave/stats       # Brave API cost monitoring (today, 7-day, 30-day usage)
+GET  /scrapers/diagnostics  # Circuit breaker, timeout config, last scan errors
 GET  /health | /scheduler/status | /scans
 ```
 **API Key:** `X-API-Key: dev-key`
@@ -352,6 +353,17 @@ USER_AGENT_BROWSER = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)..."
 create_scraper_client(user_agent, timeout, ...)
 ```
 
+**Two-phase external scraping** (2026-02 fix):
+Previous design wrapped HTTP scraping + LLM extraction in a single 60s timeout per source.
+LLM extraction alone takes 30-150s, causing all 11 PART 2 sources to timeout every scan.
+```
+Phase 2a: HTTP scraping only (SCRAPE_ONLY_TIMEOUT=120s, parallel)
+Phase 2b: LLM extraction (no per-source timeout, sequential with heartbeats)
+```
+- Stealth sources (ycombinator, github_trending, hackernews) and portfolio_diff still run fully in Phase 2a (no LLM)
+- Brave Search timeout increased from 180s→300s (`BRAVE_SEARCH_TIMEOUT`)
+- `GET /scrapers/diagnostics` — inspect circuit breaker, timeout config, last scan errors
+
 ## Monitoring (`jobs.py`, `extractor.py`)
 **Health metrics** in `_health_metrics` response field:
 - `per_source_stats`: {source: {articles, deals, leads, enterprise_ai}}
@@ -402,7 +414,7 @@ create_scraper_client(user_agent, timeout, ...)
 | New tab empty | Check `GET /scans?limit=5` - scans may be failing. Trigger manual: `POST /scheduler/trigger` |
 | Scans stuck/timeout | Fixed 2026-02: Phase 2 heartbeat + STUCK_THRESHOLD=600s. If still occurs, check Railway logs for Claude API errors, DB pool exhaustion, or memory issues |
 | "Process died unexpectedly (heartbeat stale)" | Fixed 2026-02: Periodic heartbeat during Phase 2 parallel scrapers. STUCK_THRESHOLD increased from 300→600s |
-| External scrapers all show "Error" | Likely heartbeat timeout killed scan mid-Phase 2. Fixed 2026-02: heartbeat task runs every 30s during parallel scraper execution |
+| External scrapers all show "Error" | Fixed 2026-02: Two-phase architecture separates HTTP scraping (Phase 2a, 120s timeout) from LLM extraction (Phase 2b, no timeout). Old design wrapped both in 60s — impossible since LLM takes 30-150s. Also: Brave timeout 180→300s. Check `GET /scrapers/diagnostics` for details |
 | SEC Edgar fund structure leaks | Fixed 2026-02: Period normalization (L.P.→LP), Ltd/Limited suffixes, "a Series of" SPV detection, SEC-source aggressive LLC/LP/Ltd rejection. Pre-filter in `sec_edgar.py` saves Claude API calls. Cleanup script (11 patterns) catches company-name patterns + article-title patterns (Pattern 10: "a Series of" in title, Pattern 11: SPV in title — catches deals where LLM cleaned the company name). Run `python3 scripts/cleanup_fund_structures.py --dry-run` to find remaining fund structures in DB |
 | Duplicate deals in UI | Run `python3 scripts/cleanup_duplicate_deals.py --dry-run` in railway shell. Script handles 5 cases: (1) exact duplicates, (2) null-field duplicates, (3) round-mismatch duplicates, (4) fuzzy name duplicates (suffix variations: Inc/LLC/Labs), (5) amount-based cross-round (±15% amount + 30-day window). Keeps oldest deal ID, reassigns articles. |
 | Category badges show "not ai" | Fixed 2026-02: Added 6 missing categories (crypto, fintech, healthcare, hardware, saas, other) to frontend `EnterpriseCategory` type, `CATEGORY_LABELS`, and `CATEGORY_ICONS`. Non-AI specific categories render with neutral slate badge style. |
