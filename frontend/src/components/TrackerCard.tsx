@@ -44,7 +44,7 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
       data-tracker-item-id={item.id}
       aria-label={`${item.companyName}${item.leadInvestor ? `, led by ${item.leadInvestor}` : ''}`}
       className={`
-        p-4 border bg-zinc-900/40 cursor-grab rounded-lg select-none
+        px-5 py-4 border bg-zinc-900/40 cursor-grab rounded-lg select-none
         transition-all duration-100
         ${isCurrentlyDragging ? 'opacity-30 cursor-grabbing' : ''}
         ${isSelected
@@ -59,32 +59,32 @@ export function TrackerCard({ item, isDragging, isSelected, onClick }: TrackerCa
           {item.companyName}
         </h4>
         {displayAmount && (
-          <span className="text-[15px] font-medium tabular-nums shrink-0 text-emerald-400">
+          <span className="text-[14px] font-medium tabular-nums shrink-0 text-emerald-400">
             {displayAmount}
           </span>
         )}
       </div>
 
       {/* Row 2: Round Badge · Investor | Date */}
-      <div className="flex items-center justify-between gap-3 mt-2.5">
+      <div className="flex items-center justify-between gap-3 mt-3">
         <div className="flex items-center gap-2 min-w-0">
           {item.roundType && (
-            <span className={`text-[9px] font-medium uppercase px-1.5 py-0.5 rounded border shrink-0 ${roundStyle}`}>
+            <span className={`text-[10px] font-medium uppercase px-2 py-0.5 rounded-full border shrink-0 ${roundStyle}`}>
               {item.roundType}
             </span>
           )}
           {item.leadInvestor && (
-            <span className="text-[12px] text-slate-400 truncate">{item.leadInvestor}</span>
+            <span className="text-[11px] text-slate-400 truncate">{item.leadInvestor}</span>
           )}
         </div>
-        <span className="text-[11px] text-slate-500 font-mono font-light shrink-0">
+        <span className="text-[10px] text-slate-500 font-mono font-light shrink-0">
           {formatAddedDate(item.createdAt)}
         </span>
       </div>
 
       {/* Next Step */}
       {item.nextStep && (
-        <div className="text-[11px] text-amber-400/70 mt-2.5 truncate">
+        <div className="text-[10px] text-amber-400/70 mt-2.5 truncate">
           {item.nextStep}
         </div>
       )}

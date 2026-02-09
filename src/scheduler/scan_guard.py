@@ -1,11 +1,14 @@
 """
 ScanJobGuard - Safety harness for scan job execution.
 
-FIX 2026-01: Prevents silent death of scan jobs by providing:
-1. Isolated DB connection (separate from main pool)
-2. Background heartbeat updates every 30 seconds
-3. Retry logic with exponential backoff for DB operations
-4. Signal handlers for graceful shutdown on SIGTERM/SIGINT
+Provides:
+1. Retry logic with exponential backoff for DB operations
+2. Signal handlers for graceful shutdown on SIGTERM/SIGINT
+3. Guaranteed status update on exit (success, failure, or crash)
+
+Stale scan cleanup uses lease-expiry at scan start (see jobs.py) instead of
+a background heartbeat/monitor. Any "running" scan older than 45 min is
+marked failed before a new scan begins.
 
 Usage:
     async with ScanJobGuard(scan_job_id, job_id) as guard:
@@ -16,7 +19,6 @@ On any unhandled exception, the guard automatically marks the job as failed.
 """
 
 import asyncio
-import atexit
 import logging
 import random
 import signal
@@ -31,9 +33,6 @@ from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-# Heartbeat interval in seconds
-HEARTBEAT_INTERVAL = 30
-
 # Max retries for DB operations
 MAX_DB_RETRIES = 5
 
@@ -41,7 +40,7 @@ MAX_DB_RETRIES = 5
 BASE_RETRY_DELAY = 0.5
 
 
-def _create_isolated_engine():
+def _create_guard_engine():
     """Create a separate DB engine with minimal pool for guard operations.
 
     This engine is isolated from the main pool to ensure status updates
@@ -65,7 +64,7 @@ def _create_isolated_engine():
 
 
 class ScanJobGuard:
-    """Context manager that guards scan job execution with heartbeat and failure handling."""
+    """Context manager that guards scan job execution with failure handling."""
 
     def __init__(self, scan_job_id: int, job_id: str):
         """
@@ -79,7 +78,6 @@ class ScanJobGuard:
         self.job_id = job_id
         self._engine = None
         self._session_factory = None
-        self._heartbeat_task: Optional[asyncio.Task] = None
         self._scan_task: Optional[asyncio.Task] = None
         self._success = False
         self._error_message: Optional[str] = None
@@ -88,22 +86,13 @@ class ScanJobGuard:
         self._original_sigint = None
 
     async def __aenter__(self):
-        """Enter the guard context - start heartbeat and register handlers."""
-        # Create isolated engine
-        self._engine = _create_isolated_engine()
+        """Enter the guard context - register signal handlers."""
+        # Create isolated engine for status updates
+        self._engine = _create_guard_engine()
         self._session_factory = async_sessionmaker(
             self._engine,
             class_=AsyncSession,
             expire_on_commit=False,
-        )
-
-        # Set initial heartbeat
-        await self._update_heartbeat()
-
-        # Start background heartbeat task
-        self._heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(),
-            name=f"heartbeat_{self.job_id}"
         )
 
         # Register signal handlers
@@ -114,21 +103,13 @@ class ScanJobGuard:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Exit the guard context - update final status and cleanup."""
-        # Stop heartbeat task
-        if self._heartbeat_task:
-            self._heartbeat_task.cancel()
-            try:
-                await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
-
         # Restore signal handlers
         self._restore_signal_handlers()
 
         # Determine final status
         if exc_type is not None:
             # Exception occurred - mark as failed
-            error_msg = str(exc_val) if exc_val else f"{exc_type.__name__}"
+            error_msg = str(exc_val) or f"{exc_type.__name__}"
             await self._update_status("failed", error_msg[:500])
             logger.error(f"[{self.job_id}] Scan failed with exception: {error_msg}")
         elif self._error_message:
@@ -164,39 +145,6 @@ class ScanJobGuard:
         """Set scan task reference for cancellation on shutdown signal."""
         self._scan_task = task
 
-    async def heartbeat(self):
-        """Manually update heartbeat - call this during long-running operations.
-
-        The background heartbeat task may not get CPU time during intensive
-        processing. Call this method at key checkpoints (between phases,
-        in loops) to ensure heartbeat stays fresh.
-        """
-        if not self._shutdown_requested:
-            await self._update_heartbeat()
-
-    async def _heartbeat_loop(self):
-        """Background task that updates heartbeat every HEARTBEAT_INTERVAL seconds."""
-        while True:
-            try:
-                await asyncio.sleep(HEARTBEAT_INTERVAL)
-                if self._shutdown_requested:
-                    break
-                await self._update_heartbeat()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                # Log but continue - heartbeat failure shouldn't kill the job
-                logger.warning(f"[{self.job_id}] Heartbeat update failed: {e}")
-
-    async def _update_heartbeat(self):
-        """Update the last_heartbeat timestamp with retry logic."""
-        await self._execute_with_retry(
-            "UPDATE scan_jobs SET last_heartbeat = NOW() WHERE id = :scan_job_id",
-            {"scan_job_id": self.scan_job_id},
-            operation_name="heartbeat"
-        )
-        logger.debug(f"[{self.job_id}] Heartbeat updated for scan_job_id={self.scan_job_id}")
-
     async def _update_status(self, status: str, error_message: Optional[str] = None):
         """Update the job status with retry logic."""
         params = {
@@ -210,8 +158,7 @@ class ScanJobGuard:
                 UPDATE scan_jobs
                 SET status = :status,
                     completed_at = :completed_at,
-                    error_message = :error_message,
-                    last_heartbeat = NOW()
+                    error_message = :error_message
                 WHERE id = :scan_job_id
             """
             params["error_message"] = error_message
@@ -219,8 +166,7 @@ class ScanJobGuard:
             query = """
                 UPDATE scan_jobs
                 SET status = :status,
-                    completed_at = :completed_at,
-                    last_heartbeat = NOW()
+                    completed_at = :completed_at
                 WHERE id = :scan_job_id
             """
 

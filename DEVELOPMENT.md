@@ -358,7 +358,7 @@ Previous design wrapped HTTP scraping + LLM extraction in a single 60s timeout p
 LLM extraction alone takes 30-150s, causing all 11 PART 2 sources to timeout every scan.
 ```
 Phase 2a: HTTP scraping only (SCRAPE_ONLY_TIMEOUT=120s, parallel)
-Phase 2b: LLM extraction (no per-source timeout, sequential with heartbeats)
+Phase 2b: LLM extraction (no per-source timeout, sequential)
 ```
 - Stealth sources (ycombinator, github_trending, hackernews) and portfolio_diff still run fully in Phase 2a (no LLM)
 - Brave Search timeout increased from 180s→300s (`BRAVE_SEARCH_TIMEOUT`)
@@ -380,15 +380,12 @@ Phase 2b: LLM extraction (no per-source timeout, sequential with heartbeats)
 - `HYBRID_FAILED` / `HYBRID_FAILED_HIGH_CONF` - Sonnet re-extraction errors (falls back to Haiku)
 - `INVALID_CONFIDENCE` - NaN/Inf confidence from LLM (serious parsing failure)
 - `BRAVE_BUDGET_EXCEEDED` - daily Brave API query budget reached (400 queries/day)
-- `STUCK_SCAN_DETECTED` - StuckScanMonitor marked a scan as failed (heartbeat stale)
 
-**Scan heartbeat** (2026-02 fix):
-- `ScanJobGuard` provides heartbeat updates during scan phases
-- Phase 1 (fund scrapers): Manual heartbeat after completion
-- Phase 2 (external sources): Manual heartbeat after Brave Search and SEC Edgar (longest serial sources)
-- Phase 3 (enrichment): Manual heartbeat after completion
-- `StuckScanMonitor`: `STUCK_THRESHOLD=600s` (10 min), checks every 2 min
-- If heartbeat stale for >600s → marks scan as failed with "Process died unexpectedly"
+**Stale scan cleanup** (lease-expiry):
+- At scan start, any "running" scan older than 45 min is marked failed ("Lease expired")
+- No background monitor or heartbeat — simple query in `jobs.py` before creating new ScanJob
+- `ScanJobGuard` still handles crash/signal cleanup via `__aexit__` + signal handlers
+- **Job timeout** (2026-02 fix): `JOB_TIMEOUT_SECONDS=2400` (40 min). On timeout, handler queries actual deal counts from DB and records error message + duration + stats. Guard `CancelledError` fix ensures error message is never NULL.
 
 **Cost optimizations:**
 - **LLM (2026-01):**
@@ -412,8 +409,8 @@ Phase 2b: LLM extraction (no per-source timeout, sequential with heartbeats)
 | Dates off by 1 | Use date component parsing |
 | Content hash table missing | Run `alembic upgrade head` (migration: `20260121_content_hashes`) |
 | New tab empty | Check `GET /scans?limit=5` - scans may be failing. Trigger manual: `POST /scheduler/trigger` |
-| Scans stuck/timeout | Fixed 2026-02: Phase 2 heartbeat + STUCK_THRESHOLD=600s. If still occurs, check Railway logs for Claude API errors, DB pool exhaustion, or memory issues |
-| "Process died unexpectedly (heartbeat stale)" | Fixed 2026-02: Periodic heartbeat during Phase 2 parallel scrapers. STUCK_THRESHOLD increased from 300→600s |
+| Scans stuck/timeout | Lease-expiry cleanup: any "running" scan >45 min is auto-failed at next scan start. JOB_TIMEOUT=2400s (40 min). If still occurs, check Railway logs for Claude API errors, DB pool exhaustion, or memory issues |
+| Scan timeout shows NULL error/stats | Fixed 2026-02: `CancelledError` produces empty `str()`, guard now uses `or` fallback. Timeout handler queries actual deal counts from DB and overwrites guard's incomplete update |
 | External scrapers all show "Error" | Fixed 2026-02: Two-phase architecture separates HTTP scraping (Phase 2a, 120s timeout) from LLM extraction (Phase 2b, no timeout). Old design wrapped both in 60s — impossible since LLM takes 30-150s. Also: Brave timeout 180→300s. Check `GET /scrapers/diagnostics` for details |
 | SEC Edgar fund structure leaks | Fixed 2026-02: Period normalization (L.P.→LP), Ltd/Limited suffixes, "a Series of" SPV detection, SEC-source aggressive LLC/LP/Ltd rejection. Pre-filter in `sec_edgar.py` saves Claude API calls. Cleanup script (11 patterns) catches company-name patterns + article-title patterns (Pattern 10: "a Series of" in title, Pattern 11: SPV in title — catches deals where LLM cleaned the company name). Run `python3 scripts/cleanup_fund_structures.py --dry-run` to find remaining fund structures in DB |
 | Duplicate deals in UI | Run `python3 scripts/cleanup_duplicate_deals.py --dry-run` in railway shell. Script handles 5 cases: (1) exact duplicates, (2) null-field duplicates, (3) round-mismatch duplicates, (4) fuzzy name duplicates (suffix variations: Inc/LLC/Labs), (5) amount-based cross-round (±15% amount + 30-day window). Keeps oldest deal ID, reassigns articles. |

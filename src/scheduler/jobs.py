@@ -1906,7 +1906,7 @@ async def process_stealth_signals(
     return stats
 
 
-async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = None, guard=None) -> Dict[str, Any]:
+async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Scrape all external data sources and process through extraction pipeline.
 
@@ -1985,11 +1985,6 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             _circuit_breaker.record_error("brave_search")
     elif _circuit_breaker.is_disabled("brave_search"):
         results["brave_search"] = {"error": "circuit breaker open", "articles_found": 0}
-
-    # Heartbeat after Brave Search (long-running serial source)
-    if guard:
-        await guard.heartbeat()
-        logger.debug("Phase 2: heartbeat after Brave Search")
 
     # 2. SEC EDGAR (free - Form D filings, rate limited)
     # FIX 2026-01: Added 180s timeout (SEC has many filings + rate limiting) + circuit breaker
@@ -2073,11 +2068,6 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
     else:
         results["sec_edgar"] = {"error": "circuit breaker open", "articles_found": 0}
 
-    # Heartbeat after SEC Edgar (long-running serial source)
-    if guard:
-        await guard.heartbeat()
-        logger.debug("Phase 2: heartbeat after SEC Edgar")
-
     # 3. TWITTER (API rate limited)
     # FIX 2026-01: Added 60s timeout
     if settings.twitter_bearer_token:
@@ -2156,7 +2146,7 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
     # causing ALL 11 sources to timeout every scan for 9+ days.
     #
     # NEW: Phase 2a = HTTP scraping only (120s timeout, parallel)
-    #      Phase 2b = LLM extraction (no per-source timeout, sequential with heartbeats)
+    #      Phase 2b = LLM extraction (no per-source timeout, sequential)
     # =========================================================================
 
     # --- Phase 2a: HTTP scraping only (no LLM) ---
@@ -2416,10 +2406,6 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
         ", ".join(f"{s}({n})" for s, n in sources_with_count) or "none",
     )
 
-    # Heartbeat after Phase 2a scraping
-    if guard:
-        await guard.heartbeat()
-
     # --- Phase 2b: LLM extraction (no per-source timeout) ---
     phase2b_start = time.monotonic()
     logger.info("Phase 2b: Extracting deals from %d sources via LLM...", len(sources_with_articles))
@@ -2439,10 +2425,6 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
 
         source_elapsed = time.monotonic() - source_start
         logger.info("Phase 2b: %s extraction took %.1fs (%d articles)", source_name, source_elapsed, len(articles_list))
-
-        # Heartbeat between sources to prevent stuck detection
-        if guard:
-            await guard.heartbeat()
 
     phase2b_elapsed = time.monotonic() - phase2b_start
     logger.info("Phase 2b: All extractions completed in %.1fs", phase2b_elapsed)
@@ -2605,7 +2587,7 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
 
 
 # Job-level timeout (30 minutes max to prevent hanging forever)
-JOB_TIMEOUT_SECONDS = 1800
+JOB_TIMEOUT_SECONDS = 2400
 
 
 async def scheduled_scrape_job(trigger: str = "scheduled"):
@@ -2654,12 +2636,32 @@ async def scheduled_scrape_job(trigger: str = "scheduled"):
                         select(ScanJob).where(ScanJob.id == _current_scan_job_id)
                     )
                     scan_job = result.scalar_one_or_none()
-                    if scan_job and scan_job.status == "running":
+                    if scan_job and scan_job.status != "success":
+                        # Query actual deal counts saved during scan
+                        from ..archivist.models import Deal
+                        from sqlalchemy import func, Integer
+                        count_result = await session.execute(
+                            select(
+                                func.count(Deal.id).label("total"),
+                                func.sum(func.cast(Deal.is_lead_confirmed, Integer)).label("leads"),
+                                func.sum(func.cast(Deal.is_enterprise_ai, Integer)).label("enterprise_ai"),
+                            ).where(Deal.scan_job_id == _current_scan_job_id)
+                        )
+                        counts = count_result.one()
+
                         scan_job.status = "failed"
                         scan_job.error_message = f"Job timed out after {JOB_TIMEOUT_SECONDS} seconds"
                         scan_job.completed_at = datetime.now(timezone.utc)
+                        scan_job.duration_seconds = JOB_TIMEOUT_SECONDS
+                        scan_job.total_deals_saved = int(counts.total or 0)
+                        scan_job.lead_deals_found = int(counts.leads or 0)
+                        scan_job.enterprise_ai_deals_found = int(counts.enterprise_ai or 0)
                         await session.commit()
-                        logger.info(f"Marked timed-out scan {_current_scan_job_id} as failed")
+                        logger.info(
+                            f"Marked timed-out scan {_current_scan_job_id} as failed "
+                            f"(deals_saved={counts.total or 0}, leads={counts.leads or 0}, "
+                            f"enterprise_ai={counts.enterprise_ai or 0})"
+                        )
             except Exception as e:
                 logger.error(f"Failed to update timed-out scan status: {e}")
             finally:
@@ -2669,8 +2671,8 @@ async def scheduled_scrape_job(trigger: str = "scheduled"):
 async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
     """Internal implementation of scheduled_scrape_job (separated for timeout wrapper).
 
-    FIX 2026-01: Now wrapped with ScanJobGuard for heartbeat monitoring and
-    guaranteed status updates even on crash/OOM.
+    FIX 2026-01: Now wrapped with ScanJobGuard for guaranteed status updates
+    even on crash/OOM. Stale scans cleaned up via lease-expiry at scan start.
     """
     global _last_job_run, _last_job_status, _last_job_error, _last_job_duration, _current_scan_job_id
 
@@ -2686,7 +2688,28 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
     from ..archivist.models import ScanJob
     from ..archivist.database import get_session
     from .scan_guard import guarded_scan
+    from datetime import timedelta
+    from sqlalchemy import update
     import json
+
+    # Clean up stale scans (lease expiry) — any "running" scan older than 45 min is dead
+    try:
+        async with get_session() as session:
+            stale = await session.execute(
+                update(ScanJob)
+                .where(ScanJob.status == "running")
+                .where(ScanJob.started_at < datetime.now(timezone.utc) - timedelta(seconds=2700))
+                .values(
+                    status="failed",
+                    error_message="Lease expired (exceeded 45 min)",
+                    completed_at=datetime.now(timezone.utc),
+                )
+            )
+            await session.commit()
+            if stale.rowcount > 0:
+                logger.warning(f"[{job_id}] Cleaned up {stale.rowcount} stale running scan(s)")
+    except Exception as e:
+        logger.warning(f"[{job_id}] Failed to clean up stale scans: {e}")
 
     scan_job_db_id = None
     try:
@@ -2695,7 +2718,6 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
                 job_id=job_id,
                 status="running",
                 trigger=trigger,
-                last_heartbeat=datetime.now(timezone.utc),  # FIX 2026-01: Initialize heartbeat
             )
             session.add(scan_job)
             await session.commit()
@@ -2721,8 +2743,8 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
 
     start_time = datetime.now(timezone.utc)
 
-    # FIX 2026-01: Wrap phase execution with ScanJobGuard for heartbeat monitoring
-    # and guaranteed status updates even on crash/OOM
+    # FIX 2026-01: Wrap phase execution with ScanJobGuard for guaranteed
+    # status updates even on crash/OOM
     async with guarded_scan(scan_job_db_id, job_id) as guard:
         # Pass task reference so guard can cancel on SIGTERM
         if guard:
@@ -2750,24 +2772,16 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
                 f"articles={fund_articles}, deals={fund_deals}, errors={fund_errors}"
             )
 
-            # Manual heartbeat to prevent false "stuck" detection during long scans
-            if guard:
-                await guard.heartbeat()
-
             # ===== PHASE 2: Scrape external sources (THE FIX) =====
             logger.info(f"[{job_id}] Phase 2: Scraping external sources (Brave Search, SEC, etc.)")
 
-            external_results = await scrape_external_sources(days=7, scan_job_id=scan_job_db_id, guard=guard)
+            external_results = await scrape_external_sources(days=7, scan_job_id=scan_job_db_id)
             external_deals = external_results.get("total_deals_saved", 0)
 
             logger.info(
                 f"[{job_id}] Phase 2 complete: "
                 f"external_deals={external_deals}"
             )
-
-            # Manual heartbeat after Phase 2
-            if guard:
-                await guard.heartbeat()
 
             # ===== Calculate total stats =====
             total_deals = fund_deals + external_deals
@@ -2797,10 +2811,6 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
                 enriched = await enrich_new_deals(limit=25)
                 logger.info(f"[{job_id}] Enrichment complete: {enriched} companies updated")
 
-                # Manual heartbeat after Phase 3
-                if guard:
-                    await guard.heartbeat()
-
                 # ===== PHASE 4: Enrich deal dates =====
                 logger.info(f"[{job_id}] Phase 4: Starting date enrichment (Brave + SEC verification)")
                 # COST FIX 2026-02: Reduced from 50 → 15 to cut Brave API costs
@@ -2811,10 +2821,6 @@ async def _scheduled_scrape_job_impl(trigger: str = "scheduled"):
                 logger.info(f"[{job_id}] Skipping enrichment (runs every 3rd scan, next at scan #{scan_count + (3 - scan_count % 3)})")
                 enriched = 0
                 dates_enriched = 0
-
-            # Manual heartbeat after Phase 4
-            if guard:
-                await guard.heartbeat()
 
             # Send notification
             await send_scrape_summary(
