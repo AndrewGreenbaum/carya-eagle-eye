@@ -1890,6 +1890,8 @@ async def get_scraper_diagnostics(api_key: str = Depends(verify_api_key)):
 
     # Get last scan results for source-level error info
     last_scan_errors = {}
+    last_scan_stage_dropoffs = {}
+    last_scan_save_failures_by_source = {}
     last_scan_id = None
     try:
         async with get_session() as session:
@@ -1902,12 +1904,36 @@ async def get_scraper_diagnostics(api_key: str = Depends(verify_api_key)):
             scan = result.scalar_one_or_none()
             if scan:
                 last_scan_id = scan.id
-                scan_results = scan.results or {}
+                scan_results = {}
+                if scan.source_results_json:
+                    try:
+                        scan_results = json.loads(scan.source_results_json)
+                    except Exception:
+                        scan_results = {}
+                if not scan_results:
+                    scan_results = scan.results or {}
+
                 for source_name, stats in scan_results.items():
                     if source_name == "total_deals_saved":
                         continue
-                    if isinstance(stats, dict) and "error" in stats:
-                        last_scan_errors[source_name] = stats["error"]
+                    if isinstance(stats, dict):
+                        if "error" in stats:
+                            last_scan_errors[source_name] = stats["error"]
+
+                        last_scan_stage_dropoffs[source_name] = {
+                            "articles_received": stats.get("articles_received", stats.get("articles_found", 0)),
+                            "after_source_filter": stats.get("articles_after_source_filter", 0),
+                            "after_title_filter": stats.get("articles_after_title_filter", 0),
+                            "after_content_hash": stats.get("articles_after_content_hash", 0),
+                            "save_attempts": stats.get("save_attempts", 0),
+                            "deals_saved": stats.get("deals_saved", 0),
+                        }
+
+                        if stats.get("save_failures", 0) > 0:
+                            last_scan_save_failures_by_source[source_name] = {
+                                "save_failures": stats.get("save_failures", 0),
+                                "failure_types": stats.get("save_failure_types", {}),
+                            }
     except Exception as e:
         logger.warning("Failed to fetch last scan for diagnostics: %s", e)
 
@@ -1920,6 +1946,8 @@ async def get_scraper_diagnostics(api_key: str = Depends(verify_api_key)):
         },
         "last_scan_id": last_scan_id,
         "last_scan_source_errors": last_scan_errors,
+        "last_scan_stage_dropoffs": last_scan_stage_dropoffs,
+        "last_scan_save_failures_by_source": last_scan_save_failures_by_source,
         "architecture": "two-phase (2a=HTTP scrape, 2b=LLM extraction)",
     }
 
@@ -3299,6 +3327,7 @@ class CrunchbaseDealInput(BaseModel):
     # New fields for AI classification and enrichment
     description: Optional[str] = None
     industries: List[str] = Field(default_factory=list)
+    category_groups: List[str] = Field(default_factory=list)
     website: Optional[str] = None
 
 
@@ -3353,6 +3382,7 @@ async def ingest_crunchbase_deals_endpoint(
                 # New fields for AI classification
                 description=d.description,
                 industries=d.industries,
+                category_groups=d.category_groups,
                 website=d.website,
             )
             for d in request.deals

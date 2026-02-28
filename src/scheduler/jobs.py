@@ -1442,10 +1442,17 @@ async def _process_external_articles_impl(
         "articles_skipped_cross_source": 0,  # Phase 5: Cross-source dedup
         "articles_skipped_content_hash": 0,  # Syndicated article dedup (Jan 2026)
         "articles_skipped_title": 0,  # Title pre-filter
+        # Funnel visibility counters
+        "articles_after_source_filter": 0,
+        "articles_after_title_filter": 0,
+        "articles_after_content_hash": 0,
         "deals_extracted": 0,
         "deals_saved": 0,
         "leads_saved": 0,  # NEW: Track lead deals specifically
         "enterprise_ai_saved": 0,  # NEW: Track enterprise AI deals
+        "save_attempts": 0,
+        "save_failures": 0,
+        "save_failure_types": {},
         "errors": 0,
         # NEW: Confidence band distribution (for monitoring extraction quality)
         "confidence_bands": {
@@ -1533,6 +1540,7 @@ async def _process_external_articles_impl(
         logger.info(f"[{source_name}] Skipped {stats['articles_skipped_source_specific']} articles by source-specific rules")
 
     new_articles = source_filtered_articles
+    stats["articles_after_source_filter"] = len(new_articles)
     if not new_articles:
         logger.info(f"[{source_name}] No articles after source-specific filtering")
         return stats
@@ -1542,9 +1550,11 @@ async def _process_external_articles_impl(
     # content is already funding-related but doesn't have typical news headlines
     if skip_title_filter:
         logger.info(f"[{source_name}] Skipping title filter (source content is pre-qualified)")
+        stats["articles_after_title_filter"] = len(new_articles)
     else:
         filtered_articles = []
         skipped_non_announcement = 0
+        pre_title_filter_articles = new_articles
         for article in new_articles:
             # First check: Is this clearly NOT an announcement?
             if is_non_announcement_title(article.title):
@@ -1562,10 +1572,22 @@ async def _process_external_articles_impl(
             logger.info(f"[{source_name}] Skipped {stats['articles_skipped_title']} articles without funding signals")
 
         new_articles = filtered_articles
+        stats["articles_after_title_filter"] = len(new_articles)
 
         if not new_articles:
-            logger.info(f"[{source_name}] No articles passed title filter")
-            return stats
+            # Recall guardrail: keep a small sample flowing for historically noisy sources.
+            recall_guard_sources = {"google_alerts", "techcrunch", "ventureburn", "tech_funding_news"}
+            if source_name in recall_guard_sources and pre_title_filter_articles:
+                fallback_sample = pre_title_filter_articles[:20]
+                new_articles = fallback_sample
+                stats["articles_after_title_filter"] = len(new_articles)
+                logger.warning(
+                    f"[{source_name}] Title filter dropped all articles; recall guard kept "
+                    f"{len(new_articles)} articles for extraction"
+                )
+            else:
+                logger.info(f"[{source_name}] No articles passed title filter")
+                return stats
 
     # OPTIMIZATION: Content hash dedup (Jan 2026) - catches syndicated articles with different URLs
     # Same article on TechCrunch + VentureBeat + Crunchbase = 3 Claude calls → now just 1
@@ -1578,6 +1600,7 @@ async def _process_external_articles_impl(
         logger.info(f"[{source_name}] Skipped {stats['articles_skipped_content_hash']} syndicated duplicates (same content, different URL)")
 
     new_articles = content_dedup_articles
+    stats["articles_after_content_hash"] = len(new_articles)
     if not new_articles:
         logger.info(f"[{source_name}] All articles were content duplicates")
         return stats
@@ -1665,20 +1688,34 @@ async def _process_external_articles_impl(
 
                 # Save to database
                 alert_info = None
-                async with get_session() as session:
-                    deal, alert_info = await save_deal(
-                        session=session,
-                        extraction=extraction,
-                        article_url=article.url,
-                        article_title=article.title,
-                        article_text=article.text,
-                        source_fund_slug=article.fund_slug,
-                        article_published_date=article.published_date,
-                        scan_job_id=scan_job_id,
-                        # Pass SEC amount if available (from NormalizedArticle)
-                        sec_amount_usd=getattr(article, 'sec_amount_usd', None),
-                        amount_source=getattr(article, 'amount_source', None),
+                try:
+                    async with results_lock:
+                        stats["save_attempts"] += 1
+
+                    async with get_session() as session:
+                        deal, alert_info = await save_deal(
+                            session=session,
+                            extraction=extraction,
+                            article_url=article.url,
+                            article_title=article.title,
+                            article_text=article.text,
+                            source_fund_slug=article.fund_slug,
+                            article_published_date=article.published_date,
+                            scan_job_id=scan_job_id,
+                            # Pass SEC amount if available (from NormalizedArticle)
+                            sec_amount_usd=getattr(article, 'sec_amount_usd', None),
+                            amount_source=getattr(article, 'amount_source', None),
+                        )
+                except Exception as save_err:
+                    failure_type = save_err.__class__.__name__
+                    async with results_lock:
+                        stats["save_failures"] += 1
+                        stats["save_failure_types"][failure_type] = stats["save_failure_types"].get(failure_type, 0) + 1
+                    logger.error(
+                        f"[{source_name}] [SAVE_FAILURE:{failure_type}] {article.url}: {save_err}",
+                        exc_info=True,
                     )
+                    return None
 
                 # Update stats thread-safely
                 async with results_lock:
@@ -1790,9 +1827,14 @@ async def _process_external_articles_impl(
         f"received={stats['articles_received']}, "
         f"cross_source={stats['articles_skipped_cross_source']}, "
         f"db_duplicates={stats['articles_skipped_duplicate']}, "
+        f"after_source={stats['articles_after_source_filter']}, "
+        f"after_title={stats['articles_after_title_filter']}, "
         f"content_hash={stats['articles_skipped_content_hash']}, "
+        f"after_hash={stats['articles_after_content_hash']}, "
         f"title_filtered={stats['articles_skipped_title']}, "
         f"extracted={stats['deals_extracted']}, "
+        f"save_attempts={stats['save_attempts']}, "
+        f"save_failures={stats['save_failures']}, "
         f"saved={stats['deals_saved']}, "
         f"leads={stats['leads_saved']}, "
         f"enterprise_ai={stats['enterprise_ai_saved']}, "
@@ -1955,14 +1997,14 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
     if settings.brave_search_key and not _circuit_breaker.is_disabled("brave_search"):
         try:
             from ..harvester.scrapers.brave_search import BraveSearchScraper
+            freshness = "pd" if days <= 1 else ("pw" if days <= 7 else "pm")
 
             async def _scrape_brave():
-                freshness = "pd" if days <= 1 else ("pw" if days <= 7 else "pm")
                 async with BraveSearchScraper() as scraper:
                     return await scraper.scrape_all(
                         freshness=freshness,
                         include_enterprise=True,
-                        include_participation=False,  # Lead-only focus (Jan 2026) - saves ~80 requests/scan
+                        include_participation=True,  # Recall mode: keep participation mentions, classify downstream
                         include_stealth=True,
                         include_partner_names=True,  # Critical for Benchmark, Khosla, First Round
                     )
@@ -1973,6 +2015,41 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
             stats = await process_external_articles(articles, "brave_search", scan_job_id, skip_title_filter=True)
             results["brave_search"] = stats
             total_deals_saved += stats["deals_saved"]
+
+            # Recall guardrail: if Brave yielded many articles but never reached save stage,
+            # run broad fallback queries and process those separately.
+            if stats.get("articles_received", 0) >= 50 and stats.get("save_attempts", 0) == 0:
+                logger.warning(
+                    "Brave primary path had high volume but zero save attempts; running fallback broad queries"
+                )
+                async with BraveSearchScraper() as scraper:
+                    fallback_queries = [
+                        '"AI startup" AND (funding OR raises OR raised OR "Series A" OR "Series B")',
+                        '"enterprise AI" AND (funding OR raises OR raised OR investment)',
+                        '"startup" AND ("led by" OR "co-led" OR seed OR "Series A")',
+                    ]
+                    seen_urls = set()
+                    fallback_results = []
+                    for query in fallback_queries:
+                        query_results = await scraper.search_news(query, count=20, freshness=freshness, use_cache=False)
+                        for result in query_results:
+                            if result.url not in seen_urls:
+                                seen_urls.add(result.url)
+                                fallback_results.append((result, ""))
+
+                    fallback_articles = await scraper.to_normalized_articles_batch(
+                        fallback_results,
+                        extra_tags=["brave_fallback"],
+                    )
+
+                fallback_stats = await process_external_articles(
+                    fallback_articles,
+                    "brave_search_fallback",
+                    scan_job_id,
+                    skip_title_filter=True,
+                )
+                results["brave_search_fallback"] = fallback_stats
+                total_deals_saved += fallback_stats.get("deals_saved", 0)
             _circuit_breaker.record_success("brave_search")
 
         except asyncio.TimeoutError:
@@ -2365,7 +2442,7 @@ async def scrape_external_sources(days: int = 7, scan_job_id: Optional[int] = No
         # scrape_axios(),  # DISABLED: RSS 404 Dec 2025
         # scrape_strictlyvc(),  # DISABLED: RSS dead since April 2020
         with_timeout(scrape_prwire(), SCRAPE_ONLY_TIMEOUT, "prwire"),
-        with_timeout(scrape_google_news(), SCRAPE_ONLY_TIMEOUT, "google_news"),
+        with_timeout(scrape_google_news(), 240.0, "google_news"),
         with_timeout(scrape_ycombinator(), SCRAPE_ONLY_TIMEOUT, "ycombinator"),
         with_timeout(scrape_github(), SCRAPE_ONLY_TIMEOUT, "github_trending"),
         with_timeout(scrape_hackernews(), SCRAPE_ONLY_TIMEOUT, "hackernews"),

@@ -3,6 +3,7 @@ Storage pipeline for persisting extracted deals to the database.
 """
 
 import hashlib
+import asyncio
 import json
 import re
 import logging
@@ -709,8 +710,10 @@ async def get_or_create_company(
     website = _sanitize_url(website)
     linkedin_url = _sanitize_url(linkedin_url)
 
-    # Use INSERT ... ON CONFLICT for atomic upsert
-    # The unique index is on LOWER(name), so we use that for conflict detection
+    # Use INSERT ... ON CONFLICT for atomic upsert.
+    # The unique index is on LOWER(name), so we use that for conflict detection.
+    # Some environments may temporarily lack the expression index (migration drift),
+    # so we include a fallback path to avoid hard-failing the whole scan.
     stmt = pg_insert(PortfolioCompany).values(
         name=name,
         description=description,
@@ -730,10 +733,53 @@ async def get_or_create_company(
         }
     ).returning(PortfolioCompany)
 
-    result = await session.execute(stmt)
-    # FIX 2026-01: Use scalar_one_or_none() to handle race condition edge case
-    # where UPSERT returns no rows (e.g., concurrent insert already committed)
-    company = result.scalar_one_or_none()
+    company = None
+    try:
+        result = await session.execute(stmt)
+        company = result.scalar_one_or_none()
+    except Exception as e:
+        err = str(e).lower()
+        if "no unique or exclusion constraint matching the on conflict specification" in err:
+            logger.warning(
+                "[UPSERT_COMPANY_FALLBACK] Missing expression unique index for LOWER(name); "
+                "falling back to select+insert path for '%s'",
+                name,
+            )
+            # Fallback path for environments with migration/index drift.
+            existing_stmt = select(PortfolioCompany).where(
+                func.lower(PortfolioCompany.name) == name.lower()
+            )
+            existing_result = await session.execute(existing_stmt)
+            company = existing_result.scalar_one_or_none()
+
+            if company is None:
+                # Insert via ON CONFLICT DO NOTHING to avoid transaction rollback on races.
+                fallback_stmt = pg_insert(PortfolioCompany).values(
+                    name=name,
+                    description=description,
+                    sector=sector,
+                    website=website,
+                    linkedin_url=linkedin_url,
+                    created_at=now,
+                    updated_at=now,
+                ).on_conflict_do_nothing().returning(PortfolioCompany)
+                fallback_result = await session.execute(fallback_stmt)
+                company = fallback_result.scalar_one_or_none()
+                if company is None:
+                    # Likely inserted concurrently by another worker.
+                    retry_result = await session.execute(existing_stmt)
+                    company = retry_result.scalar_one_or_none()
+        else:
+            raise
+
+    if company is None:
+        # Final defensive fallback before retry loop below.
+        fetch_stmt = select(PortfolioCompany).where(
+            func.lower(PortfolioCompany.name) == name.lower()
+        )
+        fetch_result = await session.execute(fetch_stmt)
+        company = fetch_result.scalar_one_or_none()
+
     if company is None:
         # Race condition: another process inserted this company
         # FIX 2026-01: Retry with backoff - the concurrent transaction may not have committed yet
