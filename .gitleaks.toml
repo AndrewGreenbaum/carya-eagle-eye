@@ -1,0 +1,9 @@
+title = "repo secret scanning config"
+
+[allowlist]
+description = "Allow placeholders only"
+regexes = [
+  '''<SET_IN_ENV>''',
+  '''sk-ant-\.\.\.''',
+  '''sk-\.\.\.'''
+]
