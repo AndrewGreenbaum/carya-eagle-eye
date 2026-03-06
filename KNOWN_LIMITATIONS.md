@@ -1,6 +1,6 @@
-# Known Limitations
+# Known Limitations (Carya Eagle Eye)
 
-- Some workflows still depend on external providers and can fail due to transient upstream outages.
-- Local environment setup is not fully one-command across all OS variants.
-- Observability is mostly log-driven; deeper metrics/alerting can be expanded.
-- Security scanning currently focuses on committed content; runtime misconfiguration checks can be improved.
+- Extraction quality varies by source writing style and formatting quality.
+- Some lead/participant distinctions remain ambiguous without manual context.
+- End-to-end observability can be improved with richer extraction-stage metrics.
+- Frontend assumes backend data freshness; stale ingest windows can degrade UX.

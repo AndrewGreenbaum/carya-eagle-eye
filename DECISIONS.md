@@ -1,21 +1,21 @@
-# Engineering Decisions
+# Engineering Decisions (Carya Eagle Eye)
 
-## 1) Keep config in environment variables
-I chose env-based config so deployments remain portable across local, CI, and cloud runtimes.
-Tradeoff: setup is stricter and requires reliable secret management.
+## 1) Normalize deal records at ingestion boundary
+I standardized output shape early to prevent downstream cleanup churn.
+Tradeoff: more parser constraints and mapping code.
 
-## 2) Prefer small, composable services over one large module
-I optimized for easier debugging and safer refactors.
-Tradeoff: more files and explicit wiring.
+## 2) Keep extraction and storage concerns separate
+Extraction logic and persistence logic are in different layers for safer debugging.
+Tradeoff: more cross-module interfaces.
 
-## 3) Add blocking secret scanning in CI
-I treat secret leaks as release blockers.
-Tradeoff: occasional false positives need explicit triage.
+## 3) Frontend and backend as distinct workspaces
+Allows independent deploy/debug cycles.
+Tradeoff: more env/config sync work.
 
-## 4) Keep docs operational, not aspirational
-I removed speculative roadmap language and kept runbooks tied to real workflows.
-Tradeoff: less marketing-style presentation, more technical specificity.
+## 4) Schema strictness over permissive writes
+I prefer rejecting ambiguous data over silently storing low-confidence fields.
+Tradeoff: some records require manual review.
 
-## 5) Bias for deterministic behavior in core flows
-I favor explicit defaults, bounded retries, and clear failure paths.
-Tradeoff: slightly more boilerplate in control logic.
+## 5) Test-first on parsing regressions
+I add targeted tests for failure patterns after each parsing bug.
+Tradeoff: test suite grows quickly with source variance.

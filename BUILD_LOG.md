@@ -1,13 +1,16 @@
-# Build Log
+# Build Log (Carya Eagle Eye)
 
-## v1
-Set up baseline project structure and first runnable workflow.
+## Iteration 1
+Set up backend core and source collection pipeline.
 
-## v2
-Hardened operational docs, removed sensitive patterns, and standardized environment placeholders.
+## Iteration 2
+Implemented structured extraction and normalized persistence paths.
 
-## v3
-Added security controls: CI secret scanning, pre-commit scanning, and security policy docs.
+## Iteration 3
+Added dashboard/front-end integration for reviewing extracted signals.
 
-## v4
-Added interview-focused artifacts (`DECISIONS.md`, `KNOWN_LIMITATIONS.md`, `DEMO.md`) to show reasoning and tradeoffs.
+## Iteration 4
+Addressed recall/quality regressions with extraction diagnostics and guardrails.
+
+## Iteration 5
+Added security baseline and employer-facing authenticity docs.
